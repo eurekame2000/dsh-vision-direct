@@ -111,7 +111,7 @@ const mock = createServer(async (req, res) => {
         role: 'assistant',
         model: 'mock-anthropic',
         content: [{ type: 'text', text }],
-        stop_reason: 'end_turn',
+        stop_reason: upstreamMode === 'truncated' ? 'max_tokens' : 'end_turn',
         usage: { input_tokens: 11, output_tokens: 22 },
       }),
     )
@@ -123,7 +123,7 @@ const mock = createServer(async (req, res) => {
       object: 'chat.completion',
       created: 1,
       model: 'mock-openai',
-      choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop' }],
+      choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: upstreamMode === 'truncated' ? 'length' : 'stop' }],
       usage: { prompt_tokens: 11, completion_tokens: 22, total_tokens: 33 },
     }),
   )
@@ -310,6 +310,7 @@ async function integration(G, base) {
     const imageBlock = last.body.messages[0].content.find(p => p.type === 'image')
     ok('图片是 base64 source', imageBlock?.source?.type === 'base64' && imageBlock.source.media_type === 'image/png')
     ok('max_tokens 必填', typeof last.body.max_tokens === 'number')
+    eq('输出预算够写完整证据', last.body.max_tokens, 4096)
   }
 
   console.log('\n【10】缓存')
@@ -327,6 +328,15 @@ async function integration(G, base) {
     ok('换关注点会重读', seen.length === mid + 1)
     const again = await G.readImage(img, '缓存测试', { cache: false })
     eq('cache:false 不标记 cached', again.evidence.meta.cached, false)
+  }
+
+  console.log('\n【10b】截断')
+  {
+    upstreamMode = 'truncated'
+    configure()
+    const { evidence } = await G.readImage(img, '', { cache: false })
+    ok('截断时 uncertainty 第一条就说明', (evidence.uncertainty[0] ?? '').includes('截断'), JSON.stringify(evidence.uncertainty[0]))
+    upstreamMode = 'json'
   }
 
   console.log('\n【11】兜底与错误')
@@ -429,6 +439,18 @@ async function integration(G, base) {
     const get = await fetch(`http://127.0.0.1:${port2}/v1/chat/completions`)
     eq('非 POST 405', get.status, 405)
     await G.stopGateway()
+  }
+
+  console.log('\n【12b】清空连接参数')
+  {
+    configure({ protocol: 'anthropic', pasteToPath: true, pasteKeep: 4 })
+    await G.save({ baseUrl: '', model: '', clearKey: true })
+    const cleared = G.readConfig()
+    eq('上游被清空', cleared.baseUrl, '')
+    eq('模型被清空', cleared.model, '')
+    eq('密钥被清空', cleared.apiKey, '')
+    eq('粘贴开关不受影响', cleared.pasteToPath, true)
+    eq('保留张数不受影响', cleared.pasteKeep, 4)
   }
 
   console.log('\n【13】配置落盘')

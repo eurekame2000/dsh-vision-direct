@@ -409,7 +409,7 @@ window.__ModuleLoader__.load({
     }
 
     function ConnectionForm(props) {
-      const { draft, base, patch, busy, clearKey, fetchModels, models, setModels, modelQuery, setModelQuery, filtered } = props
+      const { draft, base, patch, busy, clearKey, onClear, fetchModels, models, setModels, modelQuery, setModelQuery, filtered } = props
       const isAnthropic = draft.protocol === 'anthropic'
 
       const keyField = h(Field, {
@@ -458,8 +458,15 @@ window.__ModuleLoader__.load({
         onChange: value => patch({ baseUrl: value }),
       }))
 
+      const nothingToClear = draft.baseUrl.trim() === '' && draft.model.trim() === '' && base.hasKey !== true
       const buttons = h('div', { key: 'buttons', className: 'vg_actions' },
         base.hasKey ? h('button', { className: 'vg_btn ghost', type: 'button', disabled: busy !== '', onClick: clearKey }, '清除已存密钥') : null,
+        h('button', {
+          className: 'vg_btn ghost',
+          type: 'button',
+          disabled: busy !== '' || nothingToClear,
+          onClick: onClear,
+        }, busy === 'clear' ? h(Spinner) : null, '清空上游与密钥'),
         h('button', {
           className: 'vg_btn',
           type: 'button',
@@ -818,6 +825,15 @@ window.__ModuleLoader__.load({
         })
       }, [run, adopt])
 
+      const clearConnection = useCallback(() => {
+        if (!window.confirm('清空上游地址、模型名和密钥？预设和请求头不受影响。')) return
+        run('clear', async () => {
+          const summary = await post('/save', { baseUrl: '', model: '', clearKey: true })
+          adopt(summary)
+          setNotice({ tone: 'ok', title: '已清空连接参数', body: '上游、模型、密钥都已删除。' })
+        })
+      }, [run, adopt])
+
       const test = useCallback(() => run('test', async () => {
         setTestResult(null)
         if (dirty) {
@@ -883,7 +899,7 @@ window.__ModuleLoader__.load({
             h('p', { className: 'vg_sub' }, '给纯文本模型配一双眼睛：插件自己注册读图工具、自己直连上游，不依赖任何外部视觉工具。保存后，在对话里引用图片路径即可。')),
           h('div', { className: 'vg_pills' }, heroPills)))
 
-      const presetSection = h(Section, { title: '协议与上游', hint: '预设只填字段，所有值都能改' },
+      const presetSection = h(Section, { title: '协议与上游', hint: '预设是模板：点了只填进下面的表单，不会存成条目' },
         h(PresetPicker, { draft, presets, patch }),
         notice ? h(Notice, { tone: notice.tone, title: notice.title, body: notice.body, onClose: () => setNotice(null) }) : null)
 
@@ -891,7 +907,7 @@ window.__ModuleLoader__.load({
         title: '连接参数',
         hint: draft.protocol === 'anthropic' ? 'Anthropic Messages 协议' : 'OpenAI Chat Completions 协议',
       }, h(ConnectionForm, {
-        draft, base, patch, busy, clearKey, fetchModels,
+        draft, base, patch, busy, clearKey, onClear: clearConnection, fetchModels,
         models, setModels, modelQuery, setModelQuery, filtered,
       }))
 

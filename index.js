@@ -157,6 +157,15 @@ export async function readImage(source, focus = '', { signal, cache = true } = {
   }
   const elapsed = Date.now() - started
   const evidence = parseEvidence(extractText(config.protocol, result.payload))
+  const finishReason =
+    config.protocol === 'anthropic' ? result.payload?.stop_reason : result.payload?.choices?.[0]?.finish_reason
+  // 截断是这条链路最常见的失败方式，而且长得很像「模型不听话」。明说一句，
+  // 调用方才知道该把关注点写窄，而不是换模型。
+  if (finishReason === 'length' || finishReason === 'max_tokens') {
+    evidence.uncertainty.unshift(
+      '输出达到 max_tokens 上限被截断，OCR 与版面可能不完整。把 prompt 写窄一点（只问其中一部分）再读一次。',
+    )
+  }
   evidence.meta = {
     source: image.label,
     mime: image.mime,
