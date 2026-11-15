@@ -97,6 +97,19 @@ const PRESETS = [
   },
 ]
 
+/**
+ * 页面上看到的预设：内置里没被隐藏的，加上用户自己存的。
+ *
+ * `builtin` 只用于界面区分「隐藏」还是「真删」，不参与任何逻辑。
+ */
+function listPresets(config) {
+  const hidden = new Set(config.presets.hidden)
+  return [
+    ...PRESETS.filter(preset => !hidden.has(preset.id)).map(preset => ({ ...preset, builtin: true })),
+    ...config.presets.custom,
+  ]
+}
+
 // ── 读图 ────────────────────────────────────────────────────────────────────
 
 const CACHE_LIMIT = 32
@@ -351,7 +364,8 @@ async function summary() {
     pasteKeep: config.pasteKeep,
     gateway: { enabled: config.gateway.enabled, port, requestedPort: config.gateway.port },
     lastRead,
-    presets: PRESETS,
+    presets: listPresets(config),
+    hiddenPresets: config.presets.hidden.length,
     protocols: PROTOCOLS,
     configPath: configPath(),
   }
@@ -399,6 +413,55 @@ async function save(patch) {
   // 端口或开关变了就得重建监听，否则页面显示的端口和真正在听的不是一回事。
   await stopGateway()
   if (config.gateway.enabled) await startGateway(config.gateway.port).catch(() => 0)
+  return summary()
+}
+
+/**
+ * 预设的增删。
+ *
+ * 内置的只能隐藏（代码里还有，清空隐藏列表就回来）；自定义的是真删。两种都
+ * 走同一组 action，浏览器不用知道哪张卡是哪种。
+ */
+async function updatePresets(body) {
+  const config = readConfig()
+  const action = typeof body?.action === 'string' ? body.action : ''
+  const id = typeof body?.id === 'string' ? body.id.trim() : ''
+  if (action === 'hide') {
+    if (!PRESETS.some(preset => preset.id === id)) throw new Error(`没有这个内置预设：${id}`)
+    config.presets.hidden = [...new Set([...config.presets.hidden, id])]
+  } else if (action === 'unhide') {
+    config.presets.hidden = config.presets.hidden.filter(hidden => hidden !== id)
+  } else if (action === 'restore') {
+    config.presets.hidden = []
+  } else if (action === 'remove') {
+    config.presets.custom = config.presets.custom.filter(preset => preset.id !== id)
+  } else if (action === 'save') {
+    const preset = body?.preset ?? {}
+    if (typeof preset.baseUrl !== 'string' || preset.baseUrl.trim() === '') throw new Error('先把上游地址填好再存成预设')
+    if (typeof preset.label !== 'string' || preset.label.trim() === '') throw new Error('预设需要一个名字')
+    const next = normalize({
+      ...config,
+      presets: {
+        ...config.presets,
+        custom: [
+          ...config.presets.custom,
+          {
+            id: `custom-${Date.now().toString(36)}-${config.presets.custom.length}`,
+            label: preset.label.trim().slice(0, 40),
+            protocol: preset.protocol,
+            baseUrl: preset.baseUrl.trim(),
+            model: typeof preset.model === 'string' ? preset.model.trim() : '',
+            extraHeaders: preset.extraHeaders ?? {},
+            notes: '你自己存的预设。',
+          },
+        ],
+      },
+    })
+    config.presets = next.presets
+  } else {
+    throw new Error(`未知的预设操作：${action}`)
+  }
+  writeConfig(config)
   return summary()
 }
 
@@ -623,6 +686,10 @@ export function apply(ctx, config = {}) {
       'vision: reset',
     )
     scoped.effect(
+      () => server.register({ kind: 'exact', path: '/api/vision/presets', handler: route('POST', body => updatePresets(body)) }),
+      'vision: presets',
+    )
+    scoped.effect(
       () => server.register({ kind: 'exact', path: '/api/vision/test', handler: route('POST', () => test(), 180_000) }),
       'vision: test',
     )
@@ -695,6 +762,8 @@ export const __vision = {
   save,
   test,
   reset: resetConfig,
+  presets: updatePresets,
+  listPresets,
   listModels,
   startGateway,
   stopGateway,

@@ -636,6 +636,65 @@ async function pasteChannel(G) {
   eq('重置恢复默认协议', after.protocol, 'openai')
 }
 
+// ── 预设管理 ───────────────────────────────────────────────────────────────
+async function presetChannel(G) {
+  console.log('\n【15】预设管理')
+  G.writeConfig(G.normalize({
+    protocol: 'openai', baseUrl: 'http://127.0.0.1:1/v1', model: 'm', ...K(KEY_A),
+    gateway: { enabled: false, port: 0 },
+  }))
+
+  const initial = await G.summary()
+  eq('默认五个预设', initial.presets.length, 5)
+  ok('都标记为内置', initial.presets.every(preset => preset.builtin === true))
+  eq('初始没有隐藏', initial.hiddenPresets, 0)
+
+  await G.presets({ action: 'hide', id: 'openai' })
+  const hidden = await G.summary()
+  eq('隐藏后剩四个', hidden.presets.length, 4)
+  ok('被隐藏的不在列表里', !hidden.presets.some(preset => preset.id === 'openai'))
+  eq('隐藏计数为 1', hidden.hiddenPresets, 1)
+
+  await G.presets({ action: 'unhide', id: 'openai' })
+  eq('单个恢复', (await G.summary()).presets.length, 5)
+
+  await G.presets({ action: 'hide', id: 'openai' })
+  await G.presets({ action: 'hide', id: 'anthropic' })
+  await G.presets({ action: 'restore' })
+  const restored = await G.summary()
+  eq('一键恢复清空隐藏', restored.hiddenPresets, 0)
+  eq('一键恢复后五个都在', restored.presets.length, 5)
+
+  await G.presets({
+    action: 'save',
+    preset: { label: '我的中转', protocol: 'openai', baseUrl: 'https://relay.example/v1', model: 'glm-4v' },
+  })
+  const saved = (await G.summary()).presets.find(preset => preset.label === '我的中转')
+  ok('自定义预设被保存', saved !== undefined)
+  eq('自定义预设不是内置', saved?.builtin, false)
+  eq('自定义预设保留模型名', saved?.model, 'glm-4v')
+
+  await G.presets({ action: 'remove', id: saved.id })
+  ok('自定义预设被删除', !(await G.summary()).presets.some(preset => preset.id === saved.id))
+
+  await G.presets({ action: 'hide', id: 'nope' }).then(
+    () => ok('未知内置应当报错', false),
+    error => ok('未知内置报错清晰', error.message.includes('没有这个内置预设'), error.message),
+  )
+  await G.presets({ action: 'save', preset: { label: 'x', baseUrl: '' } }).then(
+    () => ok('空地址应当报错', false),
+    error => ok('空地址报错清晰', error.message.includes('上游地址'), error.message),
+  )
+  await G.presets({ action: 'save', preset: { label: '', baseUrl: 'https://a.example/v1' } }).then(
+    () => ok('空名字应当报错', false),
+    error => ok('空名字报错清晰', error.message.includes('名字'), error.message),
+  )
+  await G.presets({ action: 'bogus' }).then(
+    () => ok('未知操作应当报错', false),
+    error => ok('未知操作报错清晰', error.message.includes('未知的预设操作'), error.message),
+  )
+}
+
 // ── 跑 ─────────────────────────────────────────────────────────────────────
 try {
   await new Promise(resolve => mock.listen(0, '127.0.0.1', resolve))
@@ -647,6 +706,7 @@ try {
   await unit(G)
   await integration(G, base)
   await pasteChannel(G)
+  await presetChannel(G)
 } catch (error) {
   console.error('\n测试自身崩溃：', error)
   fail += 1

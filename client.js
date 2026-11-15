@@ -93,7 +93,11 @@ window.__ModuleLoader__.load({
 .vg_preset{position:relative;display:flex;flex-direction:column;gap:5px;padding:11px 12px;border-radius:12px;border:1px solid var(--dsw-alias-border-l2);background:color-mix(in srgb,var(--dsw-alias-bg-layer-3) 80%,transparent);box-shadow:inset 0 1px 0 rgb(255 255 255 / 6%);cursor:pointer;text-align:left;font:inherit;color:inherit;transition:transform .2s var(--vg-ease),box-shadow .24s ease,border-color .18s ease}
 .vg_preset:hover{transform:translateY(-2px);border-color:color-mix(in srgb,var(--dsw-alias-state-business-primary) 66%,var(--dsw-alias-border-l2));box-shadow:inset 0 1px 0 rgb(255 255 255 / 9%),0 12px 28px color-mix(in srgb,var(--dsw-alias-state-business-primary) 11%,transparent)}
 .vg_preset[aria-pressed="true"]{border-color:color-mix(in srgb,var(--dsw-alias-state-business-primary) 72%,transparent);box-shadow:inset 0 1px 0 rgb(255 255 255 / 9%),0 0 0 1px color-mix(in srgb,var(--dsw-alias-state-business-primary) 34%,transparent),0 8px 22px color-mix(in srgb,var(--dsw-alias-state-business-primary) 10%,transparent)}
-.vg_presetname{display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:640;letter-spacing:-.1px}
+.vg_presetmain{display:flex;flex-direction:column;gap:5px;padding:0;border:0;background:transparent;text-align:left;font:inherit;color:inherit;cursor:pointer;min-width:0}
+.vg_presetdel{position:absolute;top:6px;right:6px;width:20px;height:20px;border-radius:6px;border:1px solid var(--dsw-alias-border-l1);background:color-mix(in srgb,var(--dsw-alias-bg-layer-1) 82%,transparent);color:var(--dsw-alias-label-tertiary);cursor:pointer;font:inherit;font-size:12px;line-height:1;opacity:0;transition:opacity .15s ease,color .15s ease}
+.vg_preset:hover .vg_presetdel,.vg_presetdel:focus-visible{opacity:1}
+.vg_presetdel:hover{color:var(--dsw-alias-state-error-primary);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 42%,transparent)}
+.vg_presetname{display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:640;letter-spacing:-.1px;padding-right:20px}
 .vg_presetid,.vg_preseturl{font-size:10.5px;color:var(--dsw-alias-label-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .vg_presetid{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .vg_chip{font-size:9.5px;font-weight:700;letter-spacing:.3px;padding:2px 7px;border-radius:999px;border:1px solid var(--dsw-alias-border-l1);color:var(--dsw-alias-label-secondary);background:color-mix(in srgb,var(--dsw-alias-bg-layer-1) 60%,transparent);white-space:nowrap;text-transform:uppercase}
@@ -374,7 +378,7 @@ window.__ModuleLoader__.load({
     // ── sub-pages ─────────────────────────────────────────────────────────────
 
     function PresetPicker(props) {
-      const { draft, presets, patch } = props
+      const { draft, presets, patch, onDelete, onRestore, onSave, hiddenCount, busy } = props
       return h(Fragment, null,
         h('div', { className: 'vg_actions' },
           h('div', { className: 'vg_seg', role: 'group', 'aria-label': '上游协议' },
@@ -389,23 +393,47 @@ window.__ModuleLoader__.load({
               ? 'POST /chat/completions · Authorization: Bearer <key>'
               : 'POST /messages · x-api-key + anthropic-version')),
         h('div', { className: 'vg_presets' },
-          presets.map(preset => h('button', {
-            key: preset.id,
+          presets.length === 0
+            ? h('div', { className: 'vg_empty' }, '预设都被移除了。可以恢复，或者把当前配置存成一个。')
+            : presets.map(preset => h('div', {
+              key: preset.id,
+              className: 'vg_preset',
+              'aria-pressed': draft.baseUrl !== '' && draft.baseUrl === preset.baseUrl ? 'true' : 'false',
+            },
+            h('button', {
+              type: 'button',
+              className: 'vg_presetmain',
+              onClick: () => patch({
+                protocol: preset.protocol,
+                baseUrl: preset.baseUrl,
+                model: preset.model,
+                extraHeaders: { ...(preset.extraHeaders ?? {}) },
+              }),
+            },
+            h('span', { className: 'vg_presetname' },
+              preset.label,
+              h('span', { className: `vg_chip ${preset.protocol}` }, preset.protocol === 'openai' ? 'OpenAI' : 'Anthropic')),
+            h('span', { className: 'vg_presetid' }, preset.model || '—'),
+            h('span', { className: 'vg_preseturl' }, preset.baseUrl || '（自行填写）')),
+            h('button', {
+              type: 'button',
+              className: 'vg_presetdel',
+              title: preset.builtin ? '从列表里移除（内置预设，可随时恢复）' : '删除这个预设',
+              'aria-label': `移除预设 ${preset.label}`,
+              onClick: () => onDelete(preset),
+            }, '×')))),
+        h('div', { className: 'vg_actions' },
+          hiddenCount > 0
+            ? h('button', { className: 'vg_btn ghost', type: 'button', disabled: busy !== '', onClick: onRestore },
+              busy === 'restore' ? h(Spinner) : null, `恢复已移除的预设（${hiddenCount}）`)
+            : null,
+          h('button', {
+            className: 'vg_btn ghost',
             type: 'button',
-            className: 'vg_preset',
-            'aria-pressed': draft.baseUrl !== '' && draft.baseUrl === preset.baseUrl ? 'true' : 'false',
-            onClick: () => patch({
-              protocol: preset.protocol,
-              baseUrl: preset.baseUrl,
-              model: preset.model,
-              extraHeaders: { ...(preset.extraHeaders ?? {}) },
-            }),
-          },
-          h('span', { className: 'vg_presetname' },
-            preset.label,
-            h('span', { className: `vg_chip ${preset.protocol}` }, preset.protocol === 'openai' ? 'OpenAI' : 'Anthropic')),
-          h('span', { className: 'vg_presetid' }, preset.model || '—'),
-          h('span', { className: 'vg_preseturl' }, preset.baseUrl || '（自行填写）')))))
+            disabled: busy !== '' || draft.baseUrl.trim() === '',
+            onClick: onSave,
+          }, busy === 'save' ? h(Spinner) : null, '把当前配置存为预设'),
+          h('span', { className: 'vg_hint' }, '悬停卡片右上角可以移除')))
     }
 
     function ConnectionForm(props) {
@@ -825,6 +853,55 @@ window.__ModuleLoader__.load({
         })
       }, [run, adopt])
 
+      const presetAction = useCallback(async (key, body, notice) => {
+        setBusy(key)
+        setNotice(null)
+        try {
+          const summary = await post('/presets', body)
+          adopt(summary)
+          setNotice(notice)
+        } catch (err) {
+          setNotice({ tone: 'err', title: '操作失败', body: String(err?.message ?? err) })
+        } finally {
+          setBusy('')
+        }
+      }, [adopt])
+
+      const deletePreset = useCallback(preset => {
+        presetAction(
+          'preset',
+          { action: preset.builtin ? 'hide' : 'remove', id: preset.id },
+          {
+            tone: 'ok',
+            title: preset.builtin ? '已从列表移除' : '已删除预设',
+            body: preset.builtin ? '内置预设只是隐藏，上面「恢复已移除的预设」能找回来。' : preset.label,
+          },
+        )
+      }, [presetAction])
+
+      const restorePresets = useCallback(() => {
+        presetAction('restore', { action: 'restore' }, { tone: 'ok', title: '预设已恢复', body: '全部内置预设回到列表。' })
+      }, [presetAction])
+
+      const savePreset = useCallback(() => {
+        const label = window.prompt('给这个预设起个名字', draft.model || '我的预设')
+        if (label === null || label.trim() === '') return
+        presetAction(
+          'save',
+          {
+            action: 'save',
+            preset: {
+              label,
+              protocol: draft.protocol,
+              baseUrl: draft.baseUrl,
+              model: draft.model,
+              extraHeaders: draft.extraHeaders,
+            },
+          },
+          { tone: 'ok', title: '预设已保存', body: `「${label.trim()}」现在在列表里，点一下就能填回来。` },
+        )
+      }, [presetAction, draft])
+
       const clearConnection = useCallback(() => {
         if (!window.confirm('清空上游地址、模型名和密钥？预设和请求头不受影响。')) return
         run('clear', async () => {
@@ -900,7 +977,16 @@ window.__ModuleLoader__.load({
           h('div', { className: 'vg_pills' }, heroPills)))
 
       const presetSection = h(Section, { title: '协议与上游', hint: '预设是模板：点了只填进下面的表单，不会存成条目' },
-        h(PresetPicker, { draft, presets, patch }),
+        h(PresetPicker, {
+          draft,
+          presets,
+          patch,
+          onDelete: deletePreset,
+          onRestore: restorePresets,
+          onSave: savePreset,
+          hiddenCount: base.hiddenPresets ?? 0,
+          busy,
+        }),
         notice ? h(Notice, { tone: notice.tone, title: notice.title, body: notice.body, onClose: () => setNotice(null) }) : null)
 
       const formSection = h(Section, {
