@@ -203,11 +203,12 @@ window.__ModuleLoader__.load({
           pasteState.at = Date.now()
           pasteState.enabled = payload?.enabled !== false
           pasteState.takeover = payload?.takeover === true
-        } catch {
-          // 拿不到结论就退到「不接管」：宿主没装好时，与其吞掉粘贴，不如让
-          // 原生流程照旧失败一次，用户至少看得懂那个错误。
-          pasteState.enabled = false
-          pasteState.takeover = false
+        } catch (error) {
+          // 拿不到结论（路由没注册、宿主没装好）时仍然接管：上传会失败，但
+          // 失败会插一条看得见的提示，比退回原生、让图片准入悄悄拒掉要好。
+          console.error(`[vision] 无法确认模型能力：${error?.message ?? error}`)
+          pasteState.enabled = true
+          pasteState.takeover = true
         } finally {
           pasteState.pending = null
         }
@@ -216,18 +217,23 @@ window.__ModuleLoader__.load({
     }
 
     function imageFilesOf(event) {
-      const items = event.clipboardData?.items
+      // 这两个列表不是 iterable（没有 Symbol.iterator），只能按索引取。
+      const data = event.clipboardData
       const files = []
+      const items = data?.items
       if (items) {
-        for (const item of items) {
-          if (item.kind !== 'file') continue
+        for (let i = 0; i < items.length; i += 1) {
+          const item = items[i]
+          if (item === null || item === undefined || item.kind !== 'file') continue
           const file = item.getAsFile()
           if (file !== null && /^image\//.test(file.type)) files.push(file)
         }
       }
-      if (files.length === 0) {
-        for (const file of event.clipboardData?.files ?? []) {
-          if (/^image\//.test(file.type)) files.push(file)
+      const list = data?.files
+      if (files.length === 0 && list) {
+        for (let i = 0; i < list.length; i += 1) {
+          const file = list[i]
+          if (file !== null && file !== undefined && /^image\//.test(file.type)) files.push(file)
         }
       }
       return files
@@ -291,14 +297,18 @@ window.__ModuleLoader__.load({
 
     function takePaste(event) {
       if (!pasteState.enabled || !pasteState.takeover) return
-      const files = imageFilesOf(event)
-      if (files.length === 0) return
-      const target = resolveTarget(event)
-      if (target === null) return
-      // 先占住这次粘贴：原生流程一开始就会创建附件并触发准入失败。
-      event.preventDefault()
-      event.stopPropagation()
-      void uploadAndInsert(files, target)
+      try {
+        const files = imageFilesOf(event)
+        if (files.length === 0) return
+        const target = resolveTarget(event)
+        if (target === null) return
+        // 先占住这次粘贴：原生流程一开始就会创建附件并触发准入失败。
+        event.preventDefault()
+        event.stopPropagation()
+        void uploadAndInsert(files, target)
+      } catch (error) {
+        console.error(`[vision] 粘贴处理失败：${error?.message ?? error}`)
+      }
     }
 
     // ── atoms ─────────────────────────────────────────────────────────────────

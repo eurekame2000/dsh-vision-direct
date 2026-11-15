@@ -13,7 +13,9 @@
  * 密钥永远不出后端：页面只拿到 hasKey 布尔值，写入走服务端，浏览器既不读也不
  * 回写。
  */
-import { configPath, defaults, normalize, PROTOCOLS, readConfig, writeConfig } from './lib/config.js'
+import { appendFileSync, mkdirSync } from 'node:fs'
+import { join } from 'node:path'
+import { configDir, configPath, defaults, normalize, PROTOCOLS, readConfig, writeConfig } from './lib/config.js'
 import {
   anthropicToOpenai,
   anthropicToOpenaiRequest,
@@ -581,6 +583,16 @@ export function apply(ctx, config = {}) {
     registeredToolName = desiredName
   } catch (error) {
     console.error(`[vision] ${desiredName} 注册失败：${error?.message ?? error}`)
+  }
+  // 启动留痕：插件到底有没有被加载，只能从进程外面看，本机日志比猜快。
+  try {
+    mkdirSync(configDir(), { recursive: true, mode: 0o700 })
+    appendFileSync(
+      join(configDir(), 'boot.log'),
+      `${new Date().toISOString()} apply tool=${desiredName} registered=${registeredToolName === desiredName} node=${process.version}\n`,
+    )
+  } catch {
+    /* 留痕失败不影响插件 */
   }
 
   ctx.inject(['llm'], scoped => {
