@@ -13,11 +13,14 @@ import { createServer } from 'node:http'
 import { Readable } from 'node:stream'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { homedir } from 'node:os'
+import { tmpdir } from 'node:os'
 
 // 用相对路径定位被测模块：仓库挪到哪都能跑，也不会把本机目录写进公开仓库。
 const P = new URL('../index.js', import.meta.url).href
-const GW_DIR = join(homedir(), '.dsh', 'vision')
+// 用一次性目录，绝不碰用户真实的 ~/.dsh/vision：测试写脏真实配置的代价是
+// 「粘贴通道被悄悄关掉」，排查起来比测试本身还费时间。
+const GW_DIR = join(tmpdir(), `dsh-vision-test-${process.pid}`)
+process.env.DSH_VISION_CONFIG_DIR = GW_DIR
 const GW_CFG = join(GW_DIR, 'config.json')
 const TMP = join(GW_DIR, 'test-assets')
 
@@ -51,8 +54,6 @@ const PNG = Buffer.from(
   'base64',
 )
 
-const backup = existsSync(GW_CFG) ? readFileSync(GW_CFG, 'utf8') : null
-const dirExisted = existsSync(GW_DIR)
 
 const EVIDENCE = {
   summary: '一张测试图，画着一个红点。',
@@ -506,7 +507,7 @@ async function pasteChannel(G) {
   ok('返回了路径', typeof first.payload.path === 'string' && first.payload.path.endsWith('.png'), first.payload.path)
   ok('落盘文件存在', existsSync(first.payload.path))
   eq('落盘文件 600', (statSync(first.payload.path).mode & 0o777), 0o600)
-  ok('落盘目录在插件目录下', first.payload.path.includes('/.dsh/vision/pastes/'))
+  ok('落盘在配置目录的 pastes 下', first.payload.path.startsWith(join(GW_DIR, 'pastes')))
   eq('mime 正确', first.payload.mime, 'image/png')
 
   const second = await call('POST', '/api/vision/paste', PNG)
@@ -629,11 +630,7 @@ try {
   fail += 1
 } finally {
   await new Promise(resolve => mock.close(resolve))
-  if (backup !== null) writeFileSync(GW_CFG, backup)
-  else rmSync(GW_CFG, { force: true })
-  rmSync(TMP, { recursive: true, force: true })
-  rmSync(join(GW_DIR, 'pastes'), { recursive: true, force: true })
-  if (!dirExisted) rmSync(GW_DIR, { recursive: true, force: true })
+  rmSync(GW_DIR, { recursive: true, force: true })
   console.log(`\n${fail === 0 ? '全部通过' : '有失败'}：${pass} passed, ${fail} failed`)
   if (failures.length > 0) console.log(failures.map(f => ` - ${f}`).join('\n'))
   process.exitCode = fail === 0 ? 0 : 1
