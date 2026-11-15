@@ -11,7 +11,7 @@
  */
 import { createServer } from 'node:http'
 import { Readable } from 'node:stream'
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -216,12 +216,19 @@ async function unit(G) {
     eq('默认 sessionHeader 开', d.sessionHeader, true)
     eq('默认工具名', d.toolName, 'vision_read_image')
     eq('网关默认关闭', d.gateway.enabled, false)
+    eq('默认保留 10 张', d.pasteKeep, 10)
 
     const bad = G.normalize({ protocol: 'gemini', gateway: { port: 99999 }, ...K(123), toolName: '!!!' })
     eq('未知协议回落 openai', bad.protocol, 'openai')
     eq('越界端口回落 0', bad.gateway.port, 0)
     eq('非字符串 key 收敛成空串', bad.apiKey, '')
     eq('非法工具名回落默认', bad.toolName, 'vision_read_image')
+    eq('负数张数回落默认', G.normalize({ pasteKeep: -1 }).pasteKeep, 10)
+    eq('非数字张数回落默认', G.normalize({ pasteKeep: 'abc' }).pasteKeep, 10)
+    eq('小数张数回落默认', G.normalize({ pasteKeep: 2.5 }).pasteKeep, 10)
+    eq('0 表示不限', G.normalize({ pasteKeep: 0 }).pasteKeep, 0)
+    eq('超大张数封顶 1000', G.normalize({ pasteKeep: 5000 }).pasteKeep, 1000)
+    eq('字符串数字被接受', G.normalize({ pasteKeep: '7' }).pasteKeep, 7)
   }
 
   console.log('\n【7】证据解析')
@@ -530,6 +537,62 @@ async function pasteChannel(G) {
 
   rmSync(first.payload.path, { force: true })
   rmSync(third.payload.path, { force: true })
+
+  // ── 滚动清理 ──
+  const pastes = join(GW_DIR, 'pastes')
+  const variant = index => Buffer.concat([PNG, Buffer.from(`-variant-${index}`)])
+  const pause = () => new Promise(resolve => setTimeout(resolve, 5))
+  const setKeep = keep => G.writeConfig(G.normalize({
+    protocol: 'openai', baseUrl: 'http://127.0.0.1:1/v1', model: 'm', ...K(KEY_A),
+    pasteToPath: true, pasteKeep: keep, gateway: { enabled: false, port: 0 },
+  }))
+
+  rmSync(pastes, { recursive: true, force: true })
+  setKeep(3)
+  const kept = []
+  for (let i = 0; i < 5; i += 1) {
+    kept.push((await call('POST', '/api/vision/paste', variant(i))).payload.path)
+    await pause()
+  }
+  eq('保留 3 张时目录只有 3 个文件', readdirSync(pastes).length, 3)
+  ok('最旧的两张被删', !existsSync(kept[0]) && !existsSync(kept[1]))
+  ok('最新的三张都在', kept.slice(2).every(path => existsSync(path)))
+
+  // 重复粘贴应当刷新优先级，而不是因为「内容已存在」被当成旧图先删
+  rmSync(pastes, { recursive: true, force: true })
+  setKeep(2)
+  const a = (await call('POST', '/api/vision/paste', variant(10))).payload.path
+  await pause()
+  const b = (await call('POST', '/api/vision/paste', variant(11))).payload.path
+  await pause()
+  const aAgain = (await call('POST', '/api/vision/paste', variant(10))).payload.path
+  eq('重复内容路径不变', aAgain, a)
+  await pause()
+  const c = (await call('POST', '/api/vision/paste', variant(12))).payload.path
+  eq('重复粘贴后保留 2 张', readdirSync(pastes).length, 2)
+  ok('刚重复粘过的那张还在', existsSync(a))
+  ok('最新那张还在', existsSync(c))
+  ok('中间那张被挤掉', !existsSync(b))
+
+  // 0 = 不限
+  rmSync(pastes, { recursive: true, force: true })
+  setKeep(0)
+  for (let i = 0; i < 6; i += 1) {
+    await call('POST', '/api/vision/paste', variant(20 + i))
+    await pause()
+  }
+  eq('0 表示不限，6 张全留', readdirSync(pastes).length, 6)
+
+  // 只清自己命名的文件，别人放进目录的东西不碰
+  writeFileSync(join(pastes, 'mine.txt'), 'not ours')
+  setKeep(2)
+  await call('POST', '/api/vision/paste', variant(30))
+  {
+    const names = readdirSync(pastes)
+    ok('外来文件没被删', names.includes('mine.txt'))
+    eq('图片被裁到 2 张', names.filter(name => name !== 'mine.txt').length, 2)
+  }
+  rmSync(join(pastes, 'mine.txt'), { force: true })
 }
 
 // ── 跑 ─────────────────────────────────────────────────────────────────────

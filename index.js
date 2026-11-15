@@ -309,7 +309,7 @@ async function pasteRoute(req, res) {
   try {
     const buffer = await readBinary(req, PASTE_MAX_BYTES)
     if (buffer.length === 0) throw new Error('粘贴内容为空')
-    const saved = savePaste(buffer)
+    const saved = savePaste(buffer, { keep: config.pasteKeep })
     json(res, 200, saved)
   } catch (error) {
     json(res, 400, { error: String(error?.message ?? error) })
@@ -337,6 +337,7 @@ async function summary() {
     toolName: config.toolName,
     toolRegistered: registeredToolName === config.toolName,
     pasteToPath: config.pasteToPath,
+    pasteKeep: config.pasteKeep,
     gateway: { enabled: config.gateway.enabled, port, requestedPort: config.gateway.port },
     lastRead,
     presets: PRESETS,
@@ -372,6 +373,11 @@ async function save(patch) {
   }
   if (patch?.sessionHeader !== undefined) config.sessionHeader = patch.sessionHeader !== false
   if (patch?.pasteToPath !== undefined) config.pasteToPath = patch.pasteToPath !== false
+  if (patch?.pasteKeep !== undefined) {
+    const keep = Number(patch.pasteKeep)
+    if (!Number.isInteger(keep) || keep < 0) throw new Error('保留张数必须是不小于 0 的整数')
+    config.pasteKeep = Math.min(keep, 1000)
+  }
   if (patch?.gateway !== undefined && patch.gateway !== null && typeof patch.gateway === 'object') {
     config.gateway = {
       enabled: patch.gateway.enabled === true,

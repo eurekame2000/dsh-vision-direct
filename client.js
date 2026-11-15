@@ -589,7 +589,16 @@ window.__ModuleLoader__.load({
             h('div', { className: 'vg_seg' },
               h('button', { type: 'button', 'aria-pressed': draft.pasteToPath ? 'true' : 'false', onClick: () => patch({ pasteToPath: true }) }, '接管'),
               h('button', { type: 'button', 'aria-pressed': draft.pasteToPath ? 'false' : 'true', onClick: () => patch({ pasteToPath: false }) }, '原生')),
-            h('span', { className: 'vg_hint' }, '接管：图片存进 ~/.dsh/vision/pastes/，输入框里出现路径，模型再用读图工具读它。原生：交给宿主的附件流程——只有支持图片输入的模型才走得通。'))))
+            h('span', { className: 'vg_hint' }, '接管：图片存进 ~/.dsh/vision/pastes/，输入框里出现路径，模型再用读图工具读它。原生：交给宿主的附件流程——只有支持图片输入的模型才走得通。')),
+          h(Field, {
+            label: '保留张数',
+            hint: '滚动覆盖：只留最近这么多张，更早的自动删除。0 = 不限。',
+          }, h(TextInput, {
+            value: draft.pasteKeep,
+            mono: true,
+            placeholder: '10',
+            onChange: value => patch({ pasteKeep: value.replace(/[^0-9]/g, '') }),
+          }))))
     }
 
     /** 插件自己的状态：工具有没有注册上、上一次读图是什么。 */
@@ -713,6 +722,7 @@ window.__ModuleLoader__.load({
           extraHeaders: { ...(summary.extraHeaders ?? {}) },
           sessionHeader: summary.sessionHeader !== false,
           pasteToPath: summary.pasteToPath !== false,
+          pasteKeep: String(summary.pasteKeep ?? 10),
           gatewayEnabled: summary.gateway?.enabled === true,
           gatewayPort: String(summary.gateway?.requestedPort || ''),
         })
@@ -741,6 +751,7 @@ window.__ModuleLoader__.load({
         if (draft.apiKey.trim() !== '') return true
         if (draft.sessionHeader !== (base.sessionHeader !== false)) return true
         if (draft.pasteToPath !== (base.pasteToPath !== false)) return true
+        if (String(draft.pasteKeep).trim() !== String(base.pasteKeep ?? 10)) return true
         if (draft.gatewayEnabled !== (base.gateway?.enabled === true)) return true
         if (String(draft.gatewayPort).trim() !== String(base.gateway?.requestedPort || '')) return true
         const mine = Object.entries(draft.extraHeaders ?? {}).filter(([k, v]) => k.trim() !== '' && String(v).trim() !== '')
@@ -767,6 +778,7 @@ window.__ModuleLoader__.load({
           extraHeaders: draft.extraHeaders,
           sessionHeader: draft.sessionHeader,
           pasteToPath: draft.pasteToPath,
+          pasteKeep: Number(String(draft.pasteKeep).trim() === '' ? 10 : draft.pasteKeep),
           gateway: {
             enabled: draft.gatewayEnabled,
             ...(Number.isInteger(port) && port > 0 ? { port } : {}),
