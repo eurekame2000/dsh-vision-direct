@@ -1,0 +1,58 @@
+{
+  "name": "dsh-vision-direct",
+  "version": "0.2.0",
+  "private": false,
+  "description": "自带的视觉后端：给 DSH 的纯文本模型一个读图工具、一条粘贴通道，以及一个可选的本机兼容端点。不依赖任何外部视觉工具。",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib/",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node test/e2e-offline.mjs"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "vision",
+    "vlm",
+    "ocr",
+    "image",
+    "paste",
+    "openai",
+    "anthropic"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eurekame2000/dsh-vision-direct.git"
+  },
+  "homepage": "https://github.com/eurekame2000/dsh-vision-direct#readme",
+  "bugs": {
+    "url": "https://github.com/eurekame2000/dsh-vision-direct/issues"
+  },
+  "engines": {
+    "dsh": ">=0.2.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": []
+    }
+  }
+}
