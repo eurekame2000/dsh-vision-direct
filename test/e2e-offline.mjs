@@ -476,7 +476,7 @@ async function pasteChannel(G) {
   mod.apply(ctx, {})
   ok('粘贴路由已注册', typeof handlers['/api/vision/paste'] === 'function')
 
-  const call = (method, url, body) => new Promise(resolve => {
+  const call = (method, url, body, route = '/api/vision/paste') => new Promise(resolve => {
     const req = Readable.from(body === undefined ? [] : [body])
     req.method = method
     req.url = url
@@ -491,7 +491,7 @@ async function pasteChannel(G) {
         resolve({ status: this.status, payload: this.payload })
       },
     }
-    handlers['/api/vision/paste'](req, res)
+    handlers[route](req, res)
   })
 
   G.writeConfig(G.normalize({ protocol: 'openai', baseUrl: 'http://127.0.0.1:1/v1', model: 'm', ...K(KEY_A), pasteToPath: true, gateway: { enabled: false, port: 0 } }))
@@ -593,6 +593,24 @@ async function pasteChannel(G) {
     eq('图片被裁到 2 张', names.filter(name => name !== 'mine.txt').length, 2)
   }
   rmSync(join(pastes, 'mine.txt'), { force: true })
+
+  // ── 重置 ──
+  setKeep(3)
+  G.writeConfig(G.normalize({
+    protocol: 'anthropic', baseUrl: 'https://example.invalid/v1', model: 'some-vl',
+    ...K(KEY_B), extraHeaders: { 'x-custom': '1' }, pasteToPath: false, pasteKeep: 3,
+    gateway: { enabled: false, port: 0 },
+  }))
+  const reset = await call('POST', '/api/vision/reset', Buffer.from('{}'), '/api/vision/reset')
+  eq('重置返回 200', reset.status, 200)
+  const after = G.readConfig()
+  eq('重置清空上游', after.baseUrl, '')
+  eq('重置清空模型', after.model, '')
+  eq('重置清空密钥', after.apiKey, '')
+  eq('重置清空请求头', after.extraHeaders, {})
+  eq('重置恢复默认张数', after.pasteKeep, 10)
+  eq('重置恢复粘贴通道', after.pasteToPath, true)
+  eq('重置恢复默认协议', after.protocol, 'openai')
 }
 
 // ── 跑 ─────────────────────────────────────────────────────────────────────

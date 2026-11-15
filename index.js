@@ -391,6 +391,18 @@ async function save(patch) {
   return summary()
 }
 
+/**
+ * 重置：把配置写回默认值。
+ *
+ * 这是页面里唯一一个「减少」的动作——清空上游、模型、密钥、额外请求头、
+ * 粘贴张数，回到刚装上的样子。网关先停，免得它拿着旧凭据继续听。
+ */
+async function resetConfig() {
+  await stopGateway()
+  writeConfig(defaults())
+  return summary()
+}
+
 /** 直连测试：1x1 的红色 PNG，一次真图请求，回答「这套配置通不通」。 */
 async function test() {
   const config = readConfig()
@@ -586,6 +598,10 @@ export function apply(ctx, config = {}) {
       'vision: save',
     )
     scoped.effect(
+      () => server.register({ kind: 'exact', path: '/api/vision/reset', handler: route('POST', () => resetConfig()) }),
+      'vision: reset',
+    )
+    scoped.effect(
       () => server.register({ kind: 'exact', path: '/api/vision/test', handler: route('POST', () => test(), 180_000) }),
       'vision: test',
     )
@@ -657,6 +673,7 @@ export const __vision = {
   summary,
   save,
   test,
+  reset: resetConfig,
   listModels,
   startGateway,
   stopGateway,

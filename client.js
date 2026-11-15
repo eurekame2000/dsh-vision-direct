@@ -518,15 +518,16 @@ window.__ModuleLoader__.load({
           onChange: event => patch({ extraHeaders: { ...(draft.extraHeaders ?? {}), [name]: event.target.value } }),
         }),
         h('button', {
-          className: 'vg_iconbtn',
+          className: 'vg_btn ghost',
           type: 'button',
-          title: '删除这一行',
+          title: `删除请求头 ${name}`,
+          style: { padding: '4px 10px', fontSize: '11.5px' },
           onClick: () => {
             const next = { ...(draft.extraHeaders ?? {}) }
             delete next[name]
             patch({ extraHeaders: next })
           },
-        }, '×')))
+        }, '删除')))
 
       rows.push(h('div', { key: 'add' },
         h('button', {
@@ -798,6 +799,15 @@ window.__ModuleLoader__.load({
         setNotice({ tone: 'ok', title: '密钥已清除', body: '保存前请重新填写。' })
       }), [run, adopt])
 
+      const reset = useCallback(() => {
+        if (!window.confirm('清空视觉配置并回到默认值？上游、模型、密钥、额外请求头都会被删掉。')) return
+        run('reset', async () => {
+          const summary = await post('/reset', {})
+          adopt(summary)
+          setNotice({ tone: 'ok', title: '已重置', body: '配置回到默认值，粘贴张数恢复 10。' })
+        })
+      }, [run, adopt])
+
       const test = useCallback(() => run('test', async () => {
         setTestResult(null)
         if (dirty) {
@@ -892,6 +902,8 @@ window.__ModuleLoader__.load({
           busy === 'save' ? h(Spinner) : null, dirty ? '保存改动' : '已保存'),
         h('button', { key: 'test', className: 'vg_btn', type: 'button', disabled: busy !== '', onClick: test },
           busy === 'test' ? h(Spinner) : null, '测试连接'),
+        h('button', { key: 'reset', className: 'vg_btn ghost', type: 'button', disabled: busy !== '', onClick: reset },
+          busy === 'reset' ? h(Spinner) : null, '重置配置'),
       ]
       if (dirty) {
         actionButtons.push(h('button', { key: 'reset', className: 'vg_btn ghost', type: 'button', onClick: () => adopt(base) }, '放弃改动'))
