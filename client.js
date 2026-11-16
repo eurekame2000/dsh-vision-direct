@@ -30,6 +30,16 @@ window.__ModuleLoader__.load({
       try { return new URL('api/vision', document.baseURI).pathname } catch { return '/api/vision' }
     })()
 
+    /**
+     * 统一请求入口。后端路由的响应体就是 handler 返回的对象本身，没有包一层
+     * `{ data: ... }`，所以这里直接把 JSON.parse 的结果交给调用方——
+     * 调用方拿到的 `payload` 就是后端返回的那个对象。
+     *
+     * 由此推出一条读代码时的注意点：**列表类字段要按字段名取，不能把 payload
+     * 当数组**。后端约定列表一律包成对象（如 `{ models: [...] }`），
+     * 判断写成 `Array.isArray(payload?.models)`；如果哪天后端改回裸数组，
+     * 这里不会抛错，只会静默拿到空列表。新增路由时两边必须同时对齐。
+     */
     async function api(path, options) {
       const { timeout = 120_000, ...rest } = options ?? {}
       const ctrl = new AbortController()
@@ -927,6 +937,9 @@ window.__ModuleLoader__.load({
       const fetchModels = useCallback(() => run('models', async () => {
         setModels({ loading: true })
         try {
+          // 后端把列表包在 `{ models: [...] }` 里返回，这里必须按字段名取。
+          // 曾经后端直接吐裸数组，这一行 `result?.models` 恒为 undefined，
+          // 于是「拉取模型列表」永远显示 0 个且不报错。
           const result = await post('/models', {}, 60_000)
           setModels({ list: Array.isArray(result?.models) ? result.models : [] })
         } catch (err) {

@@ -612,7 +612,23 @@ function json(res, status, payload) {
   res.end(JSON.stringify(payload))
 }
 
-/** 一个路由外壳：栅栏 → 方法 → 执行 → JSON。 */
+/**
+ * 一个路由外壳：栅栏 → 方法 → 执行 → JSON。
+ *
+ * 返回形状的约定（踩过坑，别改）：
+ *   run() 返回什么，整个响应体就是什么，外壳不做任何包装。
+ *   所以 run() 必须返回**对象**，不要直接返回数组或标量。裸数组在前端是
+ *   陷阱：页面习惯写 `Array.isArray(result?.items) ? result.items : []`，
+ *   此时 `result` 本身就是数组，`result.items` 是 undefined，于是静默变成
+ *   空列表、不报错、页面只是「什么都没有」。要吐列表就用 `{ items: [...] }`
+ *   包一层。同理标量要包成 `{ value: ... }`。
+ *   历史案例：`/models` 曾直接返回 `listModels()` 的数组，导致上游 32 个模型
+ *   在页面上永远是 0 个，而全部测试仍是绿的（那条路由当时没有测试覆盖）。
+ *
+ * 超时语义：timer 到点只在响应头还没发出去时回 504，并不取消 run() 和它内部
+ * 的上游请求——「页面不等了」不等于「活儿停了」。真要取消得把 AbortSignal
+ * 一路传下去，目前是有意不做。
+ */
 function route(method, run, timeoutMs = 30_000) {
   return async (req, res) => {
     if (!isTrustedRequest(req)) {
