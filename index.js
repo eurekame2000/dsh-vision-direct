@@ -307,11 +307,7 @@ function readBinary(req, limit) {
 
 /** GET 探路 + POST 落盘。浏览器拿到 `{ path }` 后把它当文本插进输入框。 */
 async function pasteRoute(req, res) {
-  if (!isTrustedRequest(req)) {
-    res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
-    res.end('request refused: this route answers same-origin loopback only')
-    return
-  }
+  if (refuse(req, res)) return
   const config = readConfig()
   const url = new URL(req.url ?? '/', 'http://127.0.0.1')
   if (req.method === 'GET') {
@@ -581,6 +577,43 @@ function isTrustedRequest(req) {
   }
 }
 
+/**
+ * DSH 自家的准入闸（Host/Origin 栅栏 + 浏览器登录态）。
+ *
+ * 为什么需要第二道：用 `webServer.register` 挂的路由，DSH **不会**自动套
+ * Host / Origin 准入——同源的裸路由谁都能打。上面那条 isTrustedRequest 只挡
+ * 「网页替用户点按钮」这一类跨站请求，挡不住同源但未登录的客户端。
+ *
+ * `connection` 服务存在时用它做第二道（桌面端就有），未认证一律 401；headless
+ * profile 没有这个服务，那就只留第一道——降级而不是报错，插件要能在任何宿主里装上。
+ *
+ * 用 Reflect.get 而不是 `scoped.connection`：这条服务在某些宿主里是浏览器侧类型，
+ * 直接取属性在类型层面不成立，运行时也可能被代理包一层。
+ */
+let connectionService
+
+function connectionRejection(req) {
+  const connection = connectionService
+  if (connection === undefined || connection === null) return undefined
+  const requestRejection = Reflect.get(connection, 'requestRejection')
+  if (typeof requestRejection !== 'function') return undefined
+  return requestRejection.call(connection, req)
+}
+
+/** 两道闸的公共出口：返回 true 表示已经写完拒绝响应，调用方直接 return。 */
+function refuse(req, res) {
+  if (!isTrustedRequest(req)) {
+    res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
+    res.end('request refused: this route answers same-origin loopback only')
+    return true
+  }
+  const rejection = connectionRejection(req)
+  if (rejection === undefined) return false
+  res.writeHead(rejection, { 'content-type': 'text/plain; charset=utf-8' })
+  res.end('request refused: DSH connection admission rejected this request')
+  return true
+}
+
 function readBody(req, limit = 128 * 1024) {
   return new Promise((resolve, reject) => {
     const chunks = []
@@ -631,11 +664,7 @@ function json(res, status, payload) {
  */
 function route(method, run, timeoutMs = 30_000) {
   return async (req, res) => {
-    if (!isTrustedRequest(req)) {
-      res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
-      res.end('request refused: this route answers same-origin loopback only')
-      return
-    }
+    if (refuse(req, res)) return
     if (req.method !== method) {
       json(res, 405, { error: `只接受 ${method}` })
       return
@@ -685,6 +714,16 @@ export function apply(ctx, config = {}) {
 
   ctx.inject(['llm'], scoped => {
     llmService = scoped.llm
+  })
+
+  // 准入服务：有就接上（桌面端有），没有就只用自建的同源栅栏。
+  // 这里刻意不改 `inject` 常量——把它列成必需依赖会让插件在 headless profile
+  // 里直接装不上，而路由本身并不是必需品。
+  ctx.inject(['connection'], scoped => {
+    connectionService = scoped.connection
+    scoped.effect(() => () => {
+      if (connectionService === scoped.connection) connectionService = undefined
+    }, 'vision: connection')
   })
 
   ctx.inject(['webServer'], scoped => {

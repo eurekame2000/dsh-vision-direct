@@ -141,13 +141,24 @@ screenshot · 测试
 - DSH `>= 0.2.0`
 - Node.js `>= 20`（用到内置 `fetch` 与 `node:test` 之外的零依赖实现）
 
+路由准入在 DSH 提供 `connection` 服务时走 `connection.requestRejection`（桌面端默认有）；没有这条服务的 profile（如 headless）只保留自建的同源栅栏，插件照样加载。
+
 ## 开发
 
 ```sh
 node test/e2e-offline.mjs
 ```
 
-175 条离线断言，不联网：两套协议的请求头与端点、协议互转、证据解析兜底、缓存、粘贴落盘与内容寻址、滚动清理（含 0=不限与外来文件保护）、重置、预设增删、错误边界、网关四条转发路径、配置权限。测试会临时改写 `~/.dsh/vision/config.json`，跑完恢复。
+203 条离线断言，不联网：两套协议的请求头与端点、协议互转、证据解析兜底、缓存、粘贴落盘与内容寻址、滚动清理（含 0=不限与外来文件保护）、重置、预设增删、错误边界、网关四条转发路径、配置权限、路由准入。测试会临时改写 `~/.dsh/vision/config.json`，跑完恢复。
+
+### 路由准入（两道闸，都要有）
+
+`webServer.register` 挂的路由，**DSH 不会自动做 Host / Origin 准入**——这一点和 `connection.fetch.register` 不同，容易误以为「宿主已经帮我挡了」。所以每条路由的 handler 入口都调 `refuse(req, res)`，它串两道闸：
+
+1. **自建同源栅栏** `isTrustedRequest(req)`：Host 必须是回环地址，`sec-fetch-site: cross-site` 直接拒，有 Origin 时必须与 Host 同 authority。挡的是「网页替用户点按钮」。
+2. **DSH 准入** `connection.requestRejection(req)`：宿主给了 `connection` 服务就调（桌面端有），未认证一律 401。挡的是「本机另一个进程直接打端口」。没有这条服务时（headless profile）自动跳过，插件照常加载——所以它没有写进 `inject` 常量，是用 `ctx.inject(['connection'], ...)` 可选接入的。
+
+新增或修改路由时，**入口第一行必须是 `if (refuse(req, res)) return`**，不要直接调 `isTrustedRequest`——那样会漏掉第二道闸，正是维护者 fkysly 在 awesome-dsh-plugin#15548 里指出的缺口。
 
 ### 改路由时必须遵守的约定
 
@@ -156,7 +167,7 @@ node test/e2e-offline.mjs
 1. **路由返回对象，不返回裸数组或裸标量。** `route()` 外壳把 `run()` 的返回值原样当响应体，不做包装。要吐列表就包成 `{ models: [...] }`，要吐单值就包成 `{ value: ... }`。
 2. **前端按字段名取，别把 payload 当数组。** 写成 `Array.isArray(payload?.models) ? payload.models : []`。后端若改回裸数组，这一行会恒空而**不报错**。
 
-踩过的实例：`/api/vision/models` 曾经直接返回 `listModels()` 的数组，页面永远显示 0 个模型（上游实际有 32 个），而且 175 条断言全绿——**因为该路由当时没有测试覆盖**。所以规则 3：
+踩过的实例：`/api/vision/models` 曾经直接返回 `listModels()` 的数组，页面永远显示 0 个模型（上游实际有 32 个），而且当时 175 条断言全绿——**因为该路由当时没有测试覆盖**。所以规则 3：
 
 3. **新增路由要同时补一条形状断言**，至少验证「返回的是对象、列表在预期字段下、不空」。只测状态码 200 挡不住这类 bug。
 

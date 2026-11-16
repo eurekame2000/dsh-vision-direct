@@ -718,6 +718,15 @@ async function routeShapes(V, base) {
   console.log('\n【16】路由返回形状')
 
   const table = new Map()
+  // 准入桩：模拟 DSH 的 `connection.requestRejection` —— 没带认证头就拒。
+  // 真实实现看 Host/Origin 和 dsh-auth cookie，这里只验**有没有接上这道闸**。
+  let admissionCalls = 0
+  const connection = {
+    requestRejection: req => {
+      admissionCalls += 1
+      return req.headers['x-test-auth'] === 'ok' ? undefined : 403
+    },
+  }
   const host = {
     tools: { register: () => {} },
     inject: (deps, fn) => {
@@ -726,6 +735,8 @@ async function routeShapes(V, base) {
         webServer: {
           register: route => { table.set(route.path, route.handler); return { route, handler: route.handler } },
         },
+        // 只在宿主声明了 connection 依赖时才给 —— 和真宿主一样按 inject 列表下发。
+        ...(Array.isArray(deps) && deps.includes('connection') ? { connection } : {}),
         llm: { listProviders: () => [], listModels: async () => [] },
       })
     },
@@ -755,7 +766,12 @@ async function routeShapes(V, base) {
   const hit = async (method, path, body, headers = {}) => {
     const response = await fetch(origin + path, {
       method,
-      headers: { ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers },
+      headers: {
+        ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+        // 准入桩默认要求这个头；单独测「没认证被拒」时显式覆盖掉。
+        'x-test-auth': 'ok',
+        ...headers,
+      },
       body: body === undefined ? undefined : JSON.stringify(body),
     })
     const text = await response.text()
@@ -810,6 +826,18 @@ async function routeShapes(V, base) {
     const crossSite = await hit('GET', '/api/vision/summary', undefined, { origin: 'https://evil.example' })
     eq('跨站 Origin 被栅栏挡下 403', crossSite.status, 403)
 
+    // 第二道闸：DSH 的 connection.requestRejection。同源、但没通过准入的客户端
+    // （比如本机另一个进程直接打端口）必须被拒——这正是维护者 fkysly 指出的缺口：
+    // webServer.register 挂的路由，DSH 不做 Host/Origin 准入，得自己问一句。
+    const noAdmission = await hit('GET', '/api/vision/summary', undefined, { 'x-test-auth': 'no' })
+    eq('未通过准入的请求被拒', noAdmission.status, 403)
+    ok('拒绝时不吐配置内容', !String(noAdmission.text).includes('baseUrl'), noAdmission.text.slice(0, 80))
+    ok('准入闸确实被问到（不是漏接）', admissionCalls > 0, `admissionCalls=${admissionCalls}`)
+
+    // 粘贴通道走的是自己的 handler，不是 route() 外壳 —— 单独验它也接了闸。
+    const pasteNoAdmission = await hit('GET', '/api/vision/paste', undefined, { 'x-test-auth': 'no' })
+    eq('粘贴通道同样过准入闸', pasteNoAdmission.status, 403)
+
     // reset 放最后：它会把配置清回默认值，前面依赖配置的断言不能排在它后面。
     const reset = await hit('POST', '/api/vision/reset', {})
     eq('reset 状态 200', reset.status, 200)
@@ -817,6 +845,23 @@ async function routeShapes(V, base) {
   } finally {
     await new Promise(resolve => server.close(resolve))
   }
+
+  // 降级路径：headless profile 没有 connection 服务。插件必须照常装上、路由照常
+  // 用自建栅栏工作，不能因为少一条服务就整段不挂载。
+  const bareTable = new Map()
+  const bareHost = {
+    tools: { register: () => {} },
+    inject: (deps, fn) => {
+      fn({
+        effect: producer => { const value = producer(); if (value?.route) bareTable.set(value.route.path, value.route.handler) },
+        webServer: { register: r => { bareTable.set(r.path, r.handler); return { route: r, handler: r.handler } } },
+        llm: { listProviders: () => [], listModels: async () => [] },
+      })
+    },
+    effect: () => {},
+  }
+  V.apply(bareHost, {})
+  eq('没有 connection 服务时八条路由照样挂上', bareTable.size, 8)
 }
 
 // ── 跑 ─────────────────────────────────────────────────────────────────────
