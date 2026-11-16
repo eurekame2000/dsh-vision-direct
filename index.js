@@ -694,7 +694,13 @@ export function apply(ctx, config = {}) {
       'vision: test',
     )
     scoped.effect(
-      () => server.register({ kind: 'exact', path: '/api/vision/models', handler: route('POST', () => listModels(), 60_000) }),
+      () => server.register({
+        kind: 'exact',
+        path: '/api/vision/models',
+        // 用对象包一层：路由统一返回 JSON 对象，页面按 `{ models: [...] }` 取用。
+        // 裸数组在这里是个陷阱——`Array.isArray(result?.models)` 会静默变成空列表。
+        handler: route('POST', async () => ({ models: await listModels() }), 60_000),
+      }),
       'vision: models',
     )
     // 粘贴通道：浏览器 capture 阶段的 paste 把图片字节交到这里，换回一个路径。
