@@ -101,6 +101,16 @@ const mock = createServer(async (req, res) => {
     return
   }
 
+  // 上游的 /models：给两条假模型，供路由形状测试断言「列表真的透传出来」。
+  if (req.url.endsWith('/models')) {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({
+      object: 'list',
+      data: [{ id: 'mock-vision-1', name: 'Mock Vision 1' }, { id: 'mock-vision-2', name: 'Mock Vision 2' }],
+    }))
+    return
+  }
+
   const text = answerText(req, body)
   res.writeHead(200, { 'content-type': 'application/json' })
   if (req.url.endsWith('/messages')) {
@@ -695,6 +705,120 @@ async function presetChannel(G) {
   )
 }
 
+// ── 路由返回形状 ───────────────────────────────────────────────────────────
+/**
+ * 把 apply() 挂到假宿主上，用真 HTTP 打每条路由，断言**返回形状**。
+ *
+ * 为什么单列一节：其余各节都直接调 `__vision` 里导出的函数，**绕过了 route()
+ * 外壳**，所以「后端吐裸数组 / 前端按字段名取 → 恒空且不报错」这类 bug 一条都
+ * 测不出来。`/api/vision/models` 就这样让 32 个上游模型在页面上显示了很久的
+ * 0 个，而当时 175 条断言全绿。新增或修改路由时，同步在这里补一条形状断言。
+ */
+async function routeShapes(V, base) {
+  console.log('\n【16】路由返回形状')
+
+  const table = new Map()
+  const host = {
+    tools: { register: () => {} },
+    inject: (deps, fn) => {
+      fn({
+        effect: (producer) => { const value = producer(); if (value?.route) table.set(value.route.path, value.route.handler) },
+        webServer: {
+          register: route => { table.set(route.path, route.handler); return { route, handler: route.handler } },
+        },
+        llm: { listProviders: () => [], listModels: async () => [] },
+      })
+    },
+    effect: () => {},
+  }
+
+  // 路由读的是磁盘配置：先写一份指向 mock 上游的，避免碰真实上游。
+  V.__vision.writeConfig(V.__vision.normalize({
+    protocol: 'openai', baseUrl: base, model: 'mock-vision-1', ...K(KEY_A),
+    gateway: { enabled: false, port: 0 },
+  }))
+  V.apply(host, {})
+
+  const server = createServer((req, res) => {
+    const path = (req.url ?? '').split('?')[0]
+    const handler = table.get(path)
+    if (handler === undefined) {
+      res.writeHead(404, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ error: `no route ${path}` }))
+      return
+    }
+    handler(req, res)
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const origin = `http://127.0.0.1:${server.address().port}`
+
+  const hit = async (method, path, body, headers = {}) => {
+    const response = await fetch(origin + path, {
+      method,
+      headers: { ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    })
+    const text = await response.text()
+    let json = null
+    try { json = text === '' ? null : JSON.parse(text) } catch { json = null }
+    return { status: response.status, json, text }
+  }
+
+  try {
+    // 一条工具 + 八条路由（summary / save / reset / presets / test / models / paste / read）。
+    eq('八条路由全部注册', table.size, 8)
+
+    // 总纲：所有路由的响应体必须是对象。裸数组/裸标量会让前端所有按字段名
+    // 取值的写法静默失效，而 HTTP 200 看起来完全正常。
+    const summary = await hit('GET', '/api/vision/summary')
+    eq('summary 状态 200', summary.status, 200)
+    ok('summary 是对象不是数组', summary.json !== null && typeof summary.json === 'object' && !Array.isArray(summary.json))
+    ok('summary 带 presets 列表', Array.isArray(summary.json?.presets) && summary.json.presets.length > 0)
+    ok('summary 不回明文密钥', !('apiKey' in (summary.json ?? {})) && typeof summary.json?.hasKey === 'boolean')
+
+    // 这一条就是当初漏掉的 bug：裸数组 → 页面永远 0 个模型。
+    const models = await hit('POST', '/api/vision/models', {})
+    eq('models 状态 200', models.status, 200)
+    ok('models 是对象不是裸数组', models.json !== null && !Array.isArray(models.json), `实际 ${JSON.stringify(models.json).slice(0, 80)}`)
+    ok('models 列表在 models 字段下', Array.isArray(models.json?.models), `实际键 ${Object.keys(models.json ?? {}).join(',')}`)
+    eq('models 透传上游两条', models.json?.models?.length, 2)
+    eq('models 保留 id', models.json?.models?.[0]?.id, 'mock-vision-1')
+
+    const save = await hit('POST', '/api/vision/save', { pasteKeep: 6 })
+    eq('save 状态 200', save.status, 200)
+    ok('save 返回 configPath 字符串', typeof save.json?.configPath === 'string' && save.json.configPath !== '')
+
+    const test = await hit('POST', '/api/vision/test', {})
+    eq('test 状态 200', test.status, 200)
+    ok('test 返回 ok 布尔', typeof test.json?.ok === 'boolean')
+
+    const read = await hit('POST', '/api/vision/read', { path: '/tmp/definitely-not-here.png' })
+    eq('read 不存在的文件 400', read.status, 400)
+    ok('read 报错说清是找不到文件', String(read.json?.error ?? '').includes('找不到文件'), JSON.stringify(read.json).slice(0, 120))
+
+    const paste = await hit('POST', '/api/vision/paste', {})
+    eq('paste 空体 400', paste.status, 400)
+
+    const preset = await hit('POST', '/api/vision/presets', { action: 'nuke' })
+    eq('presets 非法操作 400', preset.status, 400)
+    ok('presets 报错说清哪里不对', String(preset.json?.error ?? '').includes('未知的预设操作'), JSON.stringify(preset.json).slice(0, 120))
+
+    // 外壳的两道闸：方法不对、来源不对。
+    const wrongMethod = await hit('GET', '/api/vision/models')
+    eq('方法不对回 405', wrongMethod.status, 405)
+
+    const crossSite = await hit('GET', '/api/vision/summary', undefined, { origin: 'https://evil.example' })
+    eq('跨站 Origin 被栅栏挡下 403', crossSite.status, 403)
+
+    // reset 放最后：它会把配置清回默认值，前面依赖配置的断言不能排在它后面。
+    const reset = await hit('POST', '/api/vision/reset', {})
+    eq('reset 状态 200', reset.status, 200)
+    ok('reset 同样返回完整 summary 对象', typeof reset.json?.configPath === 'string' && reset.json?.hasKey === false)
+  } finally {
+    await new Promise(resolve => server.close(resolve))
+  }
+}
+
 // ── 跑 ─────────────────────────────────────────────────────────────────────
 try {
   await new Promise(resolve => mock.listen(0, '127.0.0.1', resolve))
@@ -707,6 +831,7 @@ try {
   await integration(G, base)
   await pasteChannel(G)
   await presetChannel(G)
+  await routeShapes(V, base)
 } catch (error) {
   console.error('\n测试自身崩溃：', error)
   fail += 1
