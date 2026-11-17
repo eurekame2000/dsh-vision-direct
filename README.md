@@ -152,6 +152,12 @@ node test/e2e-offline.mjs
 
 214 条离线断言，不联网：两套协议的请求头与端点、协议互转、证据解析兜底、缓存、粘贴落盘与内容寻址、滚动清理（含 0=不限与外来文件保护）、重置、预设增删、错误边界、网关四条转发路径、配置权限、路由准入、启动日志滚动（含只留一代备份与写失败不抛）。测试会临时改写 `~/.dsh/vision/config.json`，跑完恢复。
 
+### 环境变量 `DSH_VISION_CONFIG_DIR`
+
+`lib/config.js` 支持用 `DSH_VISION_CONFIG_DIR` 覆盖配置目录，原本只为测试用。注意它会被 DSH 主机进程继承：如果你在某个 shell 里 export 过它再启动 DSH，桌面端就会一直读写那个目录下的 `config.json` 和 `boot.log`，`~/.dsh/vision/` 里的真实配置反而不生效，表现是「凭据明明填了却报上游不可用」，而 `boot.log` 停在旧时间不再增长。
+
+排查：`ps eww -p <DSH 主进程 pid> | tr ' ' '\n' | grep DSH_VISION`。清掉后要从 Finder 或 Dock 重启 DSH（从终端 `open` 会继承终端环境，等于没清）。
+
 ### 路由准入（两道闸，都要有）
 
 `webServer.register` 挂的路由，**DSH 不会自动做 Host / Origin 准入**——这一点和 `connection.fetch.register` 不同，容易误以为「宿主已经帮我挡了」。所以每条路由的 handler 入口都调 `refuse(req, res)`，它串两道闸：
