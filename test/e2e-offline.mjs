@@ -864,6 +864,54 @@ async function routeShapes(V, base) {
   eq('没有 connection 服务时八条路由照样挂上', bareTable.size, 8)
 }
 
+// ── 启动日志的滚动 ─────────────────────────────────────────────────────────
+// boot.log 是「插件有没有被加载」的唯一外部证据，只追加不裁剪会无限长。这里
+// 验滚动真的发生了、备份内容还是上一代、以及 maxBytes<=0 时确实不裁。
+async function logRolling() {
+  console.log('\n--- 启动日志滚动 ---')
+  const L = await import(new URL('../lib/log.js', import.meta.url).href)
+  const dir = join(GW_DIR, 'logtest')
+  const path = join(dir, 'boot.log')
+  const backup = `${path}.1`
+
+  // 空目录第一笔：不滚动，直接建文件。
+  const first = L.appendBootLog(dir, L.bootLogLine({ apply: 'vision_read_image', registered: true, node: 'v0' }))
+  ok('首次写入成功且不滚动', first.written === true && first.rotated === false, JSON.stringify(first))
+  ok('日志文件已生成', existsSync(path) === true)
+  const line1 = readFileSync(path, 'utf8')
+  ok('行里带 UTC 时间戳和字段', /^\d{4}-\d{2}-\d{2}T[\d:.]+Z apply=vision_read_image registered=true node=v0\n$/.test(line1), JSON.stringify(line1))
+
+  // 追加第二笔：不超限，不滚动，两行都在。
+  L.appendBootLog(dir, L.bootLogLine({ connection: 'attached', hasService: true }))
+  ok('未超限时只追加不滚动', existsSync(backup) === false && readFileSync(path, 'utf8').split('\n').filter(Boolean).length === 2)
+
+  // 把上限压到 1 字节：下一笔必须滚动。
+  const rotated = L.appendBootLog(dir, L.bootLogLine({ apply: 'third' }), { maxBytes: 1 })
+  ok('超限时触发滚动', rotated.rotated === true, JSON.stringify(rotated))
+  ok('旧内容进了 .1 备份', existsSync(backup) && readFileSync(backup, 'utf8').includes('connection=attached'), existsSync(backup) ? '' : 'backup 不存在')
+  ok('当前文件只剩新写的那一行', readFileSync(path, 'utf8').includes('apply=third') && !readFileSync(path, 'utf8').includes('connection=attached'))
+
+  // 再滚一次：只保留一代备份，旧备份被覆盖而不是无限堆 .2/.3。
+  L.appendBootLog(dir, L.bootLogLine({ apply: 'fourth' }), { maxBytes: 1 })
+  const siblings = readdirSync(dir).filter(n => n.startsWith('boot.log'))
+  eq('备份只留一代（不堆 .2/.3）', siblings.sort().join(','), 'boot.log,boot.log.1')
+  ok('备份已换成上一代内容', readFileSync(backup, 'utf8').includes('apply=third'))
+
+  // maxBytes=0 表示不限：写十笔也不滚动。
+  rmSync(dir, { recursive: true, force: true })
+  for (let i = 0; i < 10; i += 1) L.appendBootLog(dir, L.bootLogLine({ i }), { maxBytes: 0 })
+  ok('maxBytes=0 时不裁', existsSync(backup) === false && readFileSync(path, 'utf8').split('\n').filter(Boolean).length === 10)
+
+  // 目录不可写也不能抛——留痕是附属品，不能把插件拖死。
+  let threw = false
+  try {
+    L.appendBootLog(join(dir, 'nope', '\u0000bad'), L.bootLogLine({ x: 1 }))
+  } catch {
+    threw = true
+  }
+  ok('写不进去时不抛异常', threw === false)
+}
+
 // ── 跑 ─────────────────────────────────────────────────────────────────────
 try {
   await new Promise(resolve => mock.listen(0, '127.0.0.1', resolve))
@@ -877,6 +925,7 @@ try {
   await pasteChannel(G)
   await presetChannel(G)
   await routeShapes(V, base)
+  await logRolling()
 } catch (error) {
   console.error('\n测试自身崩溃：', error)
   fail += 1

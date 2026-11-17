@@ -13,8 +13,8 @@
  * 密钥永远不出后端：页面只拿到 hasKey 布尔值，写入走服务端，浏览器既不读也不
  * 回写。
  */
-import { appendFileSync, mkdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdirSync } from 'node:fs'
+import { appendBootLog, bootLogLine } from './lib/log.js'
 import { configDir, configPath, defaults, normalize, PROTOCOLS, readConfig, writeConfig } from './lib/config.js'
 import {
   anthropicToOpenai,
@@ -702,11 +702,16 @@ export function apply(ctx, config = {}) {
     console.error(`[vision] ${desiredName} 注册失败：${error?.message ?? error}`)
   }
   // 启动留痕：插件到底有没有被加载，只能从进程外面看，本机日志比猜快。
+  // 写之前按大小滚动（见 lib/log.js），避免这个文件无限长。
   try {
     mkdirSync(configDir(), { recursive: true, mode: 0o700 })
-    appendFileSync(
-      join(configDir(), 'boot.log'),
-      `${new Date().toISOString()} apply tool=${desiredName} registered=${registeredToolName === desiredName} node=${process.version}\n`,
+    appendBootLog(
+      configDir(),
+      bootLogLine({
+        apply: desiredName,
+        registered: registeredToolName === desiredName,
+        node: process.version,
+      }),
     )
   } catch {
     /* 留痕失败不影响插件 */
@@ -721,6 +726,15 @@ export function apply(ctx, config = {}) {
   // 里直接装不上，而路由本身并不是必需品。
   ctx.inject(['connection'], scoped => {
     connectionService = scoped.connection
+    // 同样留痕：路由到底有没有接上 DSH 的准入闸，只能看日志，不能靠猜。
+    try {
+      appendBootLog(
+        configDir(),
+        bootLogLine({ connection: 'attached', hasService: connectionService != null }),
+      )
+    } catch {
+      /* 留痕失败不影响插件 */
+    }
     scoped.effect(() => () => {
       if (connectionService === scoped.connection) connectionService = undefined
     }, 'vision: connection')
