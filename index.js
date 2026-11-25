@@ -15,7 +15,17 @@
  */
 import { mkdirSync } from 'node:fs'
 import { appendBootLog, bootLogLine } from './lib/log.js'
-import { configDir, configPath, defaults, normalize, PROTOCOLS, readConfig, writeConfig } from './lib/config.js'
+import {
+  LOG_MAX_BYTES_CEILING,
+  PASTE_MAX_BYTES_FLOOR,
+  configDir,
+  configPath,
+  defaults,
+  normalize,
+  PROTOCOLS,
+  readConfig,
+  writeConfig,
+} from './lib/config.js'
 import {
   anthropicToOpenai,
   anthropicToOpenaiRequest,
@@ -25,7 +35,7 @@ import {
   startGateway,
   stopGateway,
 } from './lib/gateway.js'
-import { loadImage } from './lib/image.js'
+import { loadImage, MAX_IMAGE_BYTES } from './lib/image.js'
 import { PASTE_MAX_BYTES, savePaste } from './lib/paste.js'
 import {
   EVIDENCE_SCHEMA,
@@ -255,16 +265,22 @@ function readImageTool(toolName) {
 // ── 粘贴 ────────────────────────────────────────────────────────────────────
 
 /**
- * 当前模型能不能收图？决定浏览器要不要接管这次粘贴。
+ * 当前模型能不能收图？决定浏览器要不要接管这次粘贴/拖拽。
  *
  * 只在「明确确认支持图片」时说不接管：模型选择器的标签只有描述文字和展示名，
  * 宿主只能按名字去 llm 的模型清单里找，找不到或没声明输入模态都算不确定。
  * 不确定就接管——这个插件服务的正是文本模型，猜错方向会让 ⌘V 直接报错。
+ *
+ * 返回结构化结论而不是裸布尔：takeover 之外的 reason 会一路带回浏览器 console，
+ * 「这次为什么接管/不接管」不再靠猜。matched 是命中的 provider/model。
  */
 async function pasteVerdict(label) {
   const llm = llmService
-  if (llm === null || llm === undefined || typeof label !== 'string' || label.trim() === '') return true
-  if (typeof llm.listProviders !== 'function' || typeof llm.listModels !== 'function') return true
+  if (llm === null || llm === undefined) return { takeover: true, reason: 'no-llm-service' }
+  if (typeof label !== 'string' || label.trim() === '') return { takeover: true, reason: 'empty-label' }
+  if (typeof llm.listProviders !== 'function' || typeof llm.listModels !== 'function') {
+    return { takeover: true, reason: 'no-llm-service' }
+  }
   const lowered = label.toLowerCase()
   for (const info of llm.listProviders()) {
     if (typeof info?.id !== 'string') continue
@@ -279,11 +295,13 @@ async function pasteVerdict(label) {
         // 一两个字符的名字在标签正文里到处都是，匹配上了也不足以说明是谁。
         if (typeof candidate !== 'string' || candidate.length < 3) continue
         if (!lowered.includes(candidate.toLowerCase())) continue
-        if (Array.isArray(model?.inputModalities) && model.inputModalities.includes('image')) return false
+        if (Array.isArray(model?.inputModalities) && model.inputModalities.includes('image')) {
+          return { takeover: false, reason: 'model-accepts-image', matched: `${info.id}/${model.id}` }
+        }
       }
     }
   }
-  return true
+  return { takeover: true, reason: 'no-image-model-matched' }
 }
 
 /** 原始字节请求体：不走 JSON，避免图片先 base64 一次白占 33%。 */
@@ -312,9 +330,12 @@ async function pasteRoute(req, res) {
   const url = new URL(req.url ?? '/', 'http://127.0.0.1')
   if (req.method === 'GET') {
     const label = url.searchParams.get('model') ?? ''
+    const verdict = config.pasteToPath ? await pasteVerdict(label) : { takeover: false, reason: 'paste-disabled' }
     json(res, 200, {
       enabled: config.pasteToPath,
-      takeover: config.pasteToPath ? await pasteVerdict(label) : false,
+      takeover: verdict.takeover,
+      reason: verdict.reason,
+      matched: verdict.matched ?? '',
     })
     return
   }
@@ -327,9 +348,12 @@ async function pasteRoute(req, res) {
     return
   }
   try {
-    const buffer = await readBinary(req, PASTE_MAX_BYTES)
+    // 请求体上限比保存上限宽一点（保存上限可以在页面里调小），超了在存盘
+    // 那一步给一句人话，而不是在字节流中间静默断开。
+    const limit = Math.max(config.pasteMaxBytes, PASTE_MAX_BYTES)
+    const buffer = await readBinary(req, limit)
     if (buffer.length === 0) throw new Error('粘贴内容为空')
-    const saved = savePaste(buffer, { keep: config.pasteKeep })
+    const saved = savePaste(buffer, { keep: config.pasteKeep, maxBytes: config.pasteMaxBytes })
     json(res, 200, saved)
   } catch (error) {
     json(res, 400, { error: String(error?.message ?? error) })
@@ -358,6 +382,8 @@ async function summary() {
     toolRegistered: registeredToolName === config.toolName,
     pasteToPath: config.pasteToPath,
     pasteKeep: config.pasteKeep,
+    pasteMaxBytes: config.pasteMaxBytes,
+    logMaxBytes: config.logMaxBytes,
     gateway: { enabled: config.gateway.enabled, port, requestedPort: config.gateway.port },
     lastRead,
     presets: listPresets(config),
@@ -398,6 +424,17 @@ async function save(patch) {
     const keep = Number(patch.pasteKeep)
     if (!Number.isInteger(keep) || keep < 0) throw new Error('保留张数必须是不小于 0 的整数')
     config.pasteKeep = Math.min(keep, 1000)
+  }
+  if (patch?.pasteMaxBytes !== undefined) {
+    const bytes = Number(patch.pasteMaxBytes)
+    if (!Number.isFinite(bytes) || bytes <= 0) throw new Error('单张保存上限必须是正整数（字节）')
+    config.pasteMaxBytes = Math.min(Math.max(Math.round(bytes), PASTE_MAX_BYTES_FLOOR), MAX_IMAGE_BYTES)
+  }
+  if (patch?.logMaxBytes !== undefined) {
+    const bytes = Number(patch.logMaxBytes)
+    if (!Number.isFinite(bytes) || bytes < 0) throw new Error('日志滚动上限必须是不小于 0 的整数（字节，0 = 不限）')
+    const rounded = Math.round(bytes)
+    config.logMaxBytes = rounded === 0 ? 0 : Math.min(Math.max(rounded, 4 * 1024), LOG_MAX_BYTES_CEILING)
   }
   if (patch?.gateway !== undefined && patch.gateway !== null && typeof patch.gateway === 'object') {
     config.gateway = {
@@ -702,9 +739,15 @@ export function apply(ctx, config = {}) {
     console.error(`[vision] ${desiredName} 注册失败：${error?.message ?? error}`)
   }
   // 启动留痕：插件到底有没有被加载，只能从进程外面看，本机日志比猜快。
-  // 写之前按大小滚动（见 lib/log.js），避免这个文件无限长。
+  // 写之前按大小滚动（见 lib/log.js），滚动的阈值来自配置（logMaxBytes）。
   try {
     mkdirSync(configDir(), { recursive: true, mode: 0o700 })
+    let configured = defaults()
+    try {
+      configured = readConfig()
+    } catch {
+      /* 配置读不出就按默认上限滚动，别让留痕挂掉 */
+    }
     appendBootLog(
       configDir(),
       bootLogLine({
@@ -712,6 +755,7 @@ export function apply(ctx, config = {}) {
         registered: registeredToolName === desiredName,
         node: process.version,
       }),
+      { maxBytes: configured.logMaxBytes },
     )
   } catch {
     /* 留痕失败不影响插件 */
@@ -728,9 +772,16 @@ export function apply(ctx, config = {}) {
     connectionService = scoped.connection
     // 同样留痕：路由到底有没有接上 DSH 的准入闸，只能看日志，不能靠猜。
     try {
+      let configured = defaults()
+      try {
+        configured = readConfig()
+      } catch {
+        /* 配置读不出就按默认上限滚动 */
+      }
       appendBootLog(
         configDir(),
         bootLogLine({ connection: 'attached', hasService: connectionService != null }),
+        { maxBytes: configured.logMaxBytes },
       )
     } catch {
       /* 留痕失败不影响插件 */

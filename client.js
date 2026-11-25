@@ -64,6 +64,26 @@ window.__ModuleLoader__.load({
       ...(timeout === undefined ? {} : { timeout }),
     })
 
+    // 两个上限字段在表单里用人类单位（MB / KiB），落盘用字节。空串与非法
+    // 数字回落默认值，和后端 normalize 的规则一致——两边对不齐就会出现
+    // 「没改动却一直显示可保存」的幽灵 dirty。
+    const DEFAULT_PASTE_MAX_BYTES = 8 * 1024 * 1024
+    const DEFAULT_LOG_MAX_BYTES = 256 * 1024
+
+    /** 「MB 数」→ 字节。空串、非正数、非法数字回落默认。 */
+    function mbToBytes(text) {
+      const number = Number(String(text ?? '').trim())
+      if (!Number.isFinite(number) || number <= 0) return DEFAULT_PASTE_MAX_BYTES
+      return Math.round(number * 1024 * 1024)
+    }
+
+    /** 「KiB 数」→ 字节。0 表示不限；空串、负数、非法数字回落默认。 */
+    function kibToBytes(text) {
+      const number = Number(String(text ?? '').trim())
+      if (!Number.isFinite(number) || number < 0) return DEFAULT_LOG_MAX_BYTES
+      return Math.round(number * 1024)
+    }
+
     // ── styles ────────────────────────────────────────────────────────────────
     const CSS = `
 .vg_root{--vg-ease:cubic-bezier(.16,1,.3,1);display:flex;flex-direction:column;gap:16px;max-width:1040px;font-size:13px;line-height:1.55;color:var(--dsw-alias-label-primary);-webkit-font-smoothing:antialiased}
@@ -186,14 +206,15 @@ window.__ModuleLoader__.load({
     // ── paste channel ─────────────────────────────────────────────────────────
     //
     // 文本模型收不到图片：原生粘贴会在图片准入那一步被拒。所以在捕获阶段
-    // 拦下带图的 paste，把字节交给宿主落盘，再把路径文本插回输入框。模型
-    // 看到的是一个文件路径，正好是读图工具要的参数。
+    // 拦下带图的 paste / drop，把字节交给宿主落盘，再把路径文本插回输入框。
+    // 模型看到的是一个文件路径，正好是读图工具要的参数。
     //
     // 是否该接管由宿主判定（当前模型是否明确支持图片）；浏览器只缓存 15 秒
-    // 的结论，避免每次粘贴都多一个往返。没有结论时按「接管」处理——这个
+    // 的结论，避免每次都多一个往返。没有结论时按「接管」处理——这个
     // 插件服务的本来就是文本模型，猜错方向会让 ⌘V 直接报错。
+    // 判定原因会打进 console：「这次为什么接管/不接管」不用再猜。
 
-    const pasteState = { label: '', at: 0, enabled: true, takeover: true, pending: null }
+    const pasteState = { label: '', at: 0, enabled: true, takeover: true, reason: '', pending: null }
 
     function composerLabel() {
       const buttons = document.querySelectorAll('button[aria-label]')
@@ -217,12 +238,20 @@ window.__ModuleLoader__.load({
           pasteState.at = Date.now()
           pasteState.enabled = payload?.enabled !== false
           pasteState.takeover = payload?.takeover === true
+          pasteState.reason = typeof payload?.reason === 'string' ? payload.reason : ''
+          console.info(
+            `[vision] 发图通道：${pasteState.takeover ? '接管（转路径）' : '原生'}`
+            + ` · ${pasteState.reason || '（宿主未回传原因）'}`
+            + (typeof payload?.matched === 'string' && payload.matched !== '' ? ` · 命中 ${payload.matched}` : ''),
+          )
         } catch (error) {
           // 拿不到结论（路由没注册、宿主没装好）时仍然接管：上传会失败，但
           // 失败会插一条看得见的提示，比退回原生、让图片准入悄悄拒掉要好。
-          console.error(`[vision] 无法确认模型能力：${error?.message ?? error}`)
+          // 不写 label/at——结论没拿到就不缓存，下次交互再试。
           pasteState.enabled = true
           pasteState.takeover = true
+          pasteState.reason = 'verdict-unreachable'
+          console.error(`[vision] 无法确认模型能力：${error?.message ?? error}`)
         } finally {
           pasteState.pending = null
         }
@@ -232,7 +261,8 @@ window.__ModuleLoader__.load({
 
     function imageFilesOf(event) {
       // 这两个列表不是 iterable（没有 Symbol.iterator），只能按索引取。
-      const data = event.clipboardData
+      // clipboardData 是粘贴的，dataTransfer 是拖拽的，形状同构，取到哪个用哪个。
+      const data = event.clipboardData ?? event.dataTransfer
       const files = []
       const items = data?.items
       if (items) {
@@ -322,6 +352,37 @@ window.__ModuleLoader__.load({
         void uploadAndInsert(files, target)
       } catch (error) {
         console.error(`[vision] 粘贴处理失败：${error?.message ?? error}`)
+      }
+    }
+
+    /**
+     * 拖拽放行声明：dragover 阶段读不到文件类型（只能看 kinds/types），分不清
+     * 图片和普通文件，所以这里只做三件事——通道开着、拖的确实是文件、落在
+     * 可写输入框上——就 preventDefault 声明「此处可放置」，让 drop 有机会发生。
+     * 真正的图片判定和接管留给 takeDrop；不满足条件时一律不插手，宿主和浏览器
+     * 的默认拖放行为（附件、打开文件、拖文本）照旧。
+     */
+    function prepareDrop(event) {
+      if (!pasteState.enabled || !pasteState.takeover) return
+      const types = event.dataTransfer?.types
+      if (!types || !Array.from(types).includes('Files')) return
+      if (resolveTarget(event) === null) return
+      event.preventDefault()
+    }
+
+    /** 拖拽落地：和粘贴同一条链路，图片落盘换路径。不是图片就不碰。 */
+    function takeDrop(event) {
+      if (!pasteState.enabled || !pasteState.takeover) return
+      try {
+        const files = imageFilesOf(event)
+        if (files.length === 0) return
+        const target = resolveTarget(event)
+        if (target === null) return
+        event.preventDefault()
+        event.stopPropagation()
+        void uploadAndInsert(files, target)
+      } catch (error) {
+        console.error(`[vision] 拖拽处理失败：${error?.message ?? error}`)
       }
     }
 
@@ -638,7 +699,7 @@ window.__ModuleLoader__.load({
       return h(Fragment, null,
         h('div', { className: 'vg_ptitle' },
           '粘贴通道',
-          h('span', { className: 'vg_phint' }, '⌘V 一张图 → 本机路径')),
+          h('span', { className: 'vg_phint' }, '⌘V 或拖一张图 → 本机路径')),
         h('div', { className: 'vg_form' },
           h('label', { className: 'vg_field' },
             h('span', { className: 'vg_label' }, '接管图片粘贴'),
@@ -654,6 +715,34 @@ window.__ModuleLoader__.load({
             mono: true,
             placeholder: '10',
             onChange: value => patch({ pasteKeep: value.replace(/[^0-9]/g, '') }),
+          })),
+          h(Field, {
+            label: '单张上限（MB）',
+            hint: '超过这张上限的图不落盘。最大 8 MB——读图工具的硬上限，存更大的图也读不了。',
+          }, h(TextInput, {
+            value: draft.pasteMaxMb,
+            mono: true,
+            placeholder: '8',
+            onChange: value => patch({ pasteMaxMb: value.replace(/[^0-9.]/g, '') }),
+          }))))
+    }
+
+    /** 启动日志的滚动上限：boot.log 超过就挪成 boot.log.1，只留一代备份。 */
+    function LogForm(props) {
+      const { draft, patch } = props
+      return h(Fragment, null,
+        h('div', { className: 'vg_ptitle' },
+          '启动日志',
+          h('span', { className: 'vg_phint' }, 'boot.log 的滚动上限')),
+        h('div', { className: 'vg_form' },
+          h(Field, {
+            label: '滚动上限（KiB）',
+            hint: '默认 256 KiB，够存两千多次启动。0 = 不限、不滚动。',
+          }, h(TextInput, {
+            value: draft.logMaxKib,
+            mono: true,
+            placeholder: '256',
+            onChange: value => patch({ logMaxKib: value.replace(/[^0-9]/g, '') }),
           }))))
     }
 
@@ -779,6 +868,8 @@ window.__ModuleLoader__.load({
           sessionHeader: summary.sessionHeader !== false,
           pasteToPath: summary.pasteToPath !== false,
           pasteKeep: String(summary.pasteKeep ?? 10),
+          pasteMaxMb: String(Math.round((summary.pasteMaxBytes ?? 8 * 1024 * 1024) / 1024 / 102.4) / 10),
+          logMaxKib: String(Math.round((summary.logMaxBytes ?? 256 * 1024) / 1024)),
           gatewayEnabled: summary.gateway?.enabled === true,
           gatewayPort: String(summary.gateway?.requestedPort || ''),
         })
@@ -808,6 +899,8 @@ window.__ModuleLoader__.load({
         if (draft.sessionHeader !== (base.sessionHeader !== false)) return true
         if (draft.pasteToPath !== (base.pasteToPath !== false)) return true
         if (String(draft.pasteKeep).trim() !== String(base.pasteKeep ?? 10)) return true
+        if (mbToBytes(draft.pasteMaxMb) !== Number(base.pasteMaxBytes ?? 8 * 1024 * 1024)) return true
+        if (kibToBytes(draft.logMaxKib) !== Number(base.logMaxBytes ?? 256 * 1024)) return true
         if (draft.gatewayEnabled !== (base.gateway?.enabled === true)) return true
         if (String(draft.gatewayPort).trim() !== String(base.gateway?.requestedPort || '')) return true
         const mine = Object.entries(draft.extraHeaders ?? {}).filter(([k, v]) => k.trim() !== '' && String(v).trim() !== '')
@@ -835,6 +928,8 @@ window.__ModuleLoader__.load({
           sessionHeader: draft.sessionHeader,
           pasteToPath: draft.pasteToPath,
           pasteKeep: Number(String(draft.pasteKeep).trim() === '' ? 10 : draft.pasteKeep),
+          pasteMaxBytes: mbToBytes(draft.pasteMaxMb),
+          logMaxBytes: kibToBytes(draft.logMaxKib),
           gateway: {
             enabled: draft.gatewayEnabled,
             ...(Number.isInteger(port) && port > 0 ? { port } : {}),
@@ -1019,6 +1114,7 @@ window.__ModuleLoader__.load({
       const advancedSection = h(Section, { title: '高级', hint: '只在需要时动' },
         h('div', { className: 'vg_panel' },
           h(PasteForm, { draft, patch }),
+          h(LogForm, { draft, patch }),
           h(HeaderEditor, { draft, patch }),
           h(GatewayForm, { draft, patch })))
 
@@ -1056,12 +1152,18 @@ window.__ModuleLoader__.load({
     function apply(ctx) {
       ctx.effect(() => {
         const onPaste = event => takePaste(event)
+        const onDragOver = event => prepareDrop(event)
+        const onDrop = event => takeDrop(event)
         const onFocus = () => { void refreshVerdict() }
         document.addEventListener('paste', onPaste, true)
+        document.addEventListener('dragover', onDragOver, true)
+        document.addEventListener('drop', onDrop, true)
         document.addEventListener('focusin', onFocus, true)
         void refreshVerdict()
         return () => {
           document.removeEventListener('paste', onPaste, true)
+          document.removeEventListener('dragover', onDragOver, true)
+          document.removeEventListener('drop', onDrop, true)
           document.removeEventListener('focusin', onFocus, true)
         }
       }, 'vision: paste channel')

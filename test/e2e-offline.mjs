@@ -240,6 +240,22 @@ async function unit(G) {
     eq('0 表示不限', G.normalize({ pasteKeep: 0 }).pasteKeep, 0)
     eq('超大张数封顶 1000', G.normalize({ pasteKeep: 5000 }).pasteKeep, 1000)
     eq('字符串数字被接受', G.normalize({ pasteKeep: '7' }).pasteKeep, 7)
+
+    eq('单张上限默认 8MB', G.normalize({}).pasteMaxBytes, 8 * 1024 * 1024)
+    eq('单张上限收紧生效', G.normalize({ pasteMaxBytes: 1024 * 1024 }).pasteMaxBytes, 1024 * 1024)
+    eq('单张上限放宽被封顶', G.normalize({ pasteMaxBytes: 64 * 1024 * 1024 }).pasteMaxBytes, 8 * 1024 * 1024)
+    eq('单张上限 0 回落默认', G.normalize({ pasteMaxBytes: 0 }).pasteMaxBytes, 8 * 1024 * 1024)
+    eq('单张上限过小被托底', G.normalize({ pasteMaxBytes: 100 }).pasteMaxBytes, 1024)
+    eq('单张上限小数回落默认', G.normalize({ pasteMaxBytes: 1.5 }).pasteMaxBytes, 8 * 1024 * 1024)
+    eq('单张上限字符串数字被接受', G.normalize({ pasteMaxBytes: '2097152' }).pasteMaxBytes, 2 * 1024 * 1024)
+
+    eq('日志上限默认 256KiB', G.normalize({}).logMaxBytes, 256 * 1024)
+    eq('日志上限 0 表示不限', G.normalize({ logMaxBytes: 0 }).logMaxBytes, 0)
+    eq('日志上限收紧生效', G.normalize({ logMaxBytes: 64 * 1024 }).logMaxBytes, 64 * 1024)
+    eq('日志上限越天花板被封顶', G.normalize({ logMaxBytes: 64 * 1024 * 1024 }).logMaxBytes, 16 * 1024 * 1024)
+    eq('日志上限过小被托底', G.normalize({ logMaxBytes: 1024 }).logMaxBytes, 4 * 1024)
+    eq('日志上限负数回落默认', G.normalize({ logMaxBytes: -1 }).logMaxBytes, 256 * 1024)
+    eq('日志上限字符串数字被接受', G.normalize({ logMaxBytes: '131072' }).logMaxBytes, 128 * 1024)
   }
 
   console.log('\n【7】证据解析')
@@ -463,6 +479,32 @@ async function integration(G, base) {
     eq('保留张数不受影响', cleared.pasteKeep, 4)
   }
 
+  console.log('\n【12c】上限字段的保存与封顶')
+  {
+    await G.save({ pasteMaxBytes: 1024 * 1024, logMaxBytes: 0 })
+    const saved = G.readConfig()
+    eq('单张保存上限写入', saved.pasteMaxBytes, 1024 * 1024)
+    eq('日志上限 0（不限）写入', saved.logMaxBytes, 0)
+    await G.save({ pasteMaxBytes: 64 * 1024 * 1024, logMaxBytes: 64 * 1024 * 1024 })
+    const clamped = G.readConfig()
+    eq('保存上限放宽被封顶', clamped.pasteMaxBytes, 8 * 1024 * 1024)
+    eq('日志上限越天花板被封顶', clamped.logMaxBytes, 16 * 1024 * 1024)
+    let threw = ''
+    try {
+      await G.save({ pasteMaxBytes: 0 })
+    } catch (error) {
+      threw = String(error?.message ?? error)
+    }
+    ok('保存上限 0 直接报错', threw.includes('正整数'), threw)
+    threw = ''
+    try {
+      await G.save({ logMaxBytes: -5 })
+    } catch (error) {
+      threw = String(error?.message ?? error)
+    }
+    ok('日志上限负数直接报错', threw.includes('不小于 0'), threw)
+  }
+
   console.log('\n【13】配置落盘')
   {
     configure({ protocol: 'anthropic', sessionHeader: true, extraHeaders: { 'x-custom': 'v-$uuid' } })
@@ -533,6 +575,7 @@ async function pasteChannel(G) {
   eq('探路返回 200', probe.status, 200)
   eq('通道开着', probe.payload.enabled, true)
   eq('无 llm 时默认接管', probe.payload.takeover, true)
+  eq('判定原因带回浏览器', probe.payload.reason, 'no-llm-service')
 
   const first = await call('POST', '/api/vision/paste', PNG)
   eq('粘一张图返回 200', first.status, 200)
@@ -541,6 +584,15 @@ async function pasteChannel(G) {
   eq('落盘文件 600', (statSync(first.payload.path).mode & 0o777), 0o600)
   ok('落盘在配置目录的 pastes 下', first.payload.path.startsWith(join(GW_DIR, 'pastes')))
   eq('mime 正确', first.payload.mime, 'image/png')
+
+  // 单张保存上限走配置：把上限压到 1KiB，比它大的图在存盘那一步被拒。
+  G.writeConfig(G.normalize({ protocol: 'openai', baseUrl: 'http://127.0.0.1:1/v1', model: 'm', ...K(KEY_A), pasteToPath: true, pasteMaxBytes: 1024, gateway: { enabled: false, port: 0 } }))
+  const oversized = await call('POST', '/api/vision/paste', Buffer.concat([PNG, Buffer.alloc(4096)]))
+  eq('超单张上限 400', oversized.status, 400)
+  ok('超限提示说清是保存上限', String(oversized.payload.error).includes('保存上限'), String(oversized.payload.error))
+  const stillSmall = await call('POST', '/api/vision/paste', PNG)
+  eq('上限内的图照常落盘', stillSmall.status, 200)
+  G.writeConfig(G.normalize({ protocol: 'openai', baseUrl: 'http://127.0.0.1:1/v1', model: 'm', ...K(KEY_A), pasteToPath: true, gateway: { enabled: false, port: 0 } }))
 
   const second = await call('POST', '/api/vision/paste', PNG)
   eq('同一张图内容寻址', second.payload.path, first.payload.path)
