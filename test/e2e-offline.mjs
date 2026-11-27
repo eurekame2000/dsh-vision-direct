@@ -258,6 +258,61 @@ async function unit(G) {
     eq('日志上限字符串数字被接受', G.normalize({ logMaxBytes: '131072' }).logMaxBytes, 128 * 1024)
   }
 
+  console.log('\n【6b】粘贴接管判定（同名孪生冲突走安全方向）')
+  {
+    // 复刻生产 profile：glm 与 zhipu 两个 provider 下都有 glm-5.3-flash，
+    // input 声明可能只补了一边——2026-11-27「又不能发图了」的根因。
+    const img = ['text', 'image']
+    const makeService = providers => ({
+      listProviders: () => Object.keys(providers).map(id => ({ id })),
+      listModels: async id => providers[id],
+    })
+    const before = { // 修复前的配置：glm 侧声明了 image，zhipu 侧没声明，裸 glm-5.3 也没声明
+      glm: [
+        { id: 'glm-5.3', name: 'glm-5.3' },
+        { id: 'glm-5.3-flash', name: 'glm-5.3-flash', inputModalities: img },
+        { id: 'glm-5-turbo', name: 'glm-5-turbo' },
+        { id: 'glm-4.6v-flash', name: 'glm-4.6v-flash', inputModalities: img },
+      ],
+      zhipu: [{ id: 'glm-5.3-flash', name: 'glm-5.3-flash' }],
+    }
+    const after = { // 修复后：所有 glm 系条目都如实声明
+      glm: [
+        { id: 'glm-5.3', name: 'glm-5.3', inputModalities: img },
+        { id: 'glm-5.3-flash', name: 'glm-5.3-flash', inputModalities: img },
+        { id: 'glm-5-turbo', name: 'glm-5-turbo' },
+        { id: 'glm-4.6v-flash', name: 'glm-4.6v-flash', inputModalities: img },
+      ],
+      zhipu: [{ id: 'glm-5.3-flash', name: 'glm-5.3-flash', inputModalities: img }],
+    }
+
+    eq('服务缺失时接管', (await G.pasteVerdict('glm-5.3-flash', null)).takeover, true)
+    eq('服务缺失原因', (await G.pasteVerdict('glm-5.3-flash', null)).reason, 'no-llm-service')
+    eq('空标签接管', (await G.pasteVerdict('  ', makeService(after))).takeover, true)
+    eq('空标签原因', (await G.pasteVerdict('  ', makeService(after))).reason, 'empty-label')
+
+    const conflict = await G.pasteVerdict('glm-5.3-flash', makeService(before))
+    eq('孪生声明冲突时接管（修复前配置）', conflict.takeover, true)
+    eq('冲突原因 = conflicting-modalities', conflict.reason, 'conflicting-modalities')
+    ok('冲突命中同时列出未声明与声明两侧', (conflict.matched ?? '').includes(' vs '), conflict.matched)
+
+    const fixed = await G.pasteVerdict('glm-5.3-flash', makeService(after))
+    eq('全部声明 image 时放行原生（修复后配置）', fixed.takeover, false)
+    eq('放行原因 = model-accepts-image', fixed.reason, 'model-accepts-image')
+    // matched 只是诊断字段：扫描顺序里裸 glm-5.3 先被子串命中且已声明，记录它
+    eq('放行命中记录第一个声明条目', fixed.matched, 'glm/glm-5.3')
+
+    const bare = await G.pasteVerdict('glm-5.3', makeService(after))
+    eq('裸 glm-5.3 也放行（子串命中的条目皆已声明）', bare.takeover, false)
+
+    const turbo = await G.pasteVerdict('glm-5-turbo', makeService(after))
+    eq('纯文本模型接管', turbo.takeover, true)
+    eq('接管原因 = no-image-model-matched', turbo.reason, 'no-image-model-matched')
+
+    const unknown = await G.pasteVerdict('claude-opus-4', makeService(after))
+    eq('完全未命中的模型接管', unknown.takeover, true)
+  }
+
   console.log('\n【7】证据解析')
   {
     const fenced = G.parseEvidence('```json\n' + JSON.stringify(EVIDENCE) + '\n```')

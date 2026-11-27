@@ -1,6 +1,6 @@
 {
   "name": "dsh-vision-direct",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "private": false,
   "description": "自带的视觉后端：给 DSH 的纯文本模型一个读图工具、一条粘贴通道，以及一个可选的本机兼容端点。不依赖任何外部视觉工具。",
   "type": "module",

@@ -273,15 +273,18 @@ function readImageTool(toolName) {
  *
  * 返回结构化结论而不是裸布尔：takeover 之外的 reason 会一路带回浏览器 console，
  * 「这次为什么接管/不接管」不再靠猜。matched 是命中的 provider/model。
+ * service 参数仅供离线测试注入假 llm 服务；运行时不传，用 ctx.inject 装上的那个。
  */
-async function pasteVerdict(label) {
-  const llm = llmService
+async function pasteVerdict(label, service = llmService) {
+  const llm = service
   if (llm === null || llm === undefined) return { takeover: true, reason: 'no-llm-service' }
   if (typeof label !== 'string' || label.trim() === '') return { takeover: true, reason: 'empty-label' }
   if (typeof llm.listProviders !== 'function' || typeof llm.listModels !== 'function') {
     return { takeover: true, reason: 'no-llm-service' }
   }
   const lowered = label.toLowerCase()
+  let imageHit = '' // 声明了 image 的命中（provider/model）
+  let textHit = '' // 未声明 image 的命中
   for (const info of llm.listProviders()) {
     if (typeof info?.id !== 'string') continue
     let models = []
@@ -291,15 +294,31 @@ async function pasteVerdict(label) {
       continue
     }
     for (const model of models) {
+      let hit = ''
       for (const candidate of [model?.name, model?.id]) {
         // 一两个字符的名字在标签正文里到处都是，匹配上了也不足以说明是谁。
         if (typeof candidate !== 'string' || candidate.length < 3) continue
         if (!lowered.includes(candidate.toLowerCase())) continue
-        if (Array.isArray(model?.inputModalities) && model.inputModalities.includes('image')) {
-          return { takeover: false, reason: 'model-accepts-image', matched: `${info.id}/${model.id}` }
-        }
+        hit = `${info.id}/${model.id}`
+        break
+      }
+      if (hit === '') continue
+      const declaresImage = Array.isArray(model?.inputModalities) && model.inputModalities.includes('image')
+      if (declaresImage) {
+        if (imageHit === '') imageHit = hit
+      } else if (textHit === '') {
+        textHit = hit
       }
     }
+  }
+  // 同名孪生声明冲突（如 glm/glm-5.3-flash 声明 image、zhipu/glm-5.3-flash 未声明）：
+  // 判定器无法知道活动 provider 是谁，声明了 image 的孪生会误导放行 → 原生附件被宿主拒收。
+  // 冲突时按安全方向接管——转路径对文本模型永远可用。
+  if (imageHit !== '' && textHit !== '') {
+    return { takeover: true, reason: 'conflicting-modalities', matched: `${textHit} vs ${imageHit}` }
+  }
+  if (imageHit !== '') {
+    return { takeover: false, reason: 'model-accepts-image', matched: imageHit }
   }
   return { takeover: true, reason: 'no-image-model-matched' }
 }
@@ -891,6 +910,7 @@ export const __vision = {
   presets: updatePresets,
   listPresets,
   listModels,
+  pasteVerdict, // 离线测试注入假 llm 服务验证接管判定
   startGateway,
   stopGateway,
   gatewayPort,
